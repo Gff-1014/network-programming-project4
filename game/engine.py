@@ -1,550 +1,451 @@
-# -*- coding: utf-8 -*-
+"""对局状态机（本项目自研）。
 
+一个 `Match` 实例就是"一局"：
+
+    WAITING（等三人准备） → DEALING（发牌） → BIDDING（叫分）
+        → PLAYING（出牌） → SETTLED（结算） → 可 reset 再来一局
+
+设计约定：
+
+1. **纯逻辑**：不涉及网络、asyncio、文件，只接收玩家的动作，返回结果与事件。
+2. **时间由外部注入**：判定超时、生成截止时间都用调用方传入的时钟，
+   保证"一切以服务端时间为准"，也方便测试用假时钟。
+3. **事件流**：每次状态变更都追加事件，网络层的广播、观战推送、对局日志
+   全部由事件生成，不需要另外维护一套逻辑。
+4. **手牌私有**：只有 `view_for(玩家)` 才包含该玩家自己的手牌，
+   `public_view()` 只给张数与公开信息（观战者用这个）。
 """
-斗地主规则检查及比较器
-~~~~~~~~~~~~~~~~~~~~~
-枚举所有37种牌型，制作一个花色无关、顺序无关的字典，
-能够在O(1)时间内判断出牌是否有效，在O(1)时间内比较大小
 
-来源: https://github.com/onestraw/doudizhu  (doudizhu/engine.py)
-版权: Copyright (c) 2018 Larry He，许可见 game/LICENSE-onestraw.txt
-改动: 去掉 Python 2 兼容分支；去掉 import 时对根 logger 的 basicConfig，
-      改用模块级 logger。
-"""
-import itertools
-import logging
-
-from functools import cmp_to_key
-
-logger = logging.getLogger(__name__)
-
-
-CARDS = '3-4-5-6-7-8-9-10-J-Q-K-A-2-BJ-CJ'.split('-')
-CARD_IDX = {c: w for w, c in enumerate(CARDS)}
-CARDS_NO_JOKERS = CARDS[:-2]
-CARD_PAIR = [[c] * 2 for c in CARDS_NO_JOKERS]
-CARD_TRIO = [[c] * 3 for c in CARDS_NO_JOKERS]
-CARD_FOUR = [[c] * 4 for c in CARDS_NO_JOKERS]
-
-
-def cards2str(cards):
-    return '-'.join(cards)
-
-
-def str2cards(string):
-    return string.split('-')
-
-
-def str2cardmap(string):
-    cards = str2cards(string)
-    cardmap = {}
-    for c in cards:
-        if c in cardmap:
-            cardmap[c] += 1
-        else:
-            cardmap[c] = 1
-    return cardmap
-
-
-def sort_cards(cards):
-    return sorted(cards, key=cmp_to_key(
-        lambda x, y: CARD_IDX[x] - CARD_IDX[y]))
-
-
-def order_repeat(cards, n):
-    """按序重复每一个元素n次
-    ([a,b,c], 3)
-    -->[a,a,a,b,b,b,c,c,c]
-    """
-    tmp = []
-    for c in cards:
-        tmp += [c] * n
-    return tmp
-
-
-def put_sorted_cards(result, cards, weight):
-    """cards is a list of card
-    sort, 2str, append
-    """
-    result.append((cards2str(sort_cards(cards)), weight))
-
-
-def enum_solo():
-    """枚举所有单牌，并附加权重，以便比较大小"""
-    return [(c, w) for w, c in enumerate(CARDS)]
-
-
-def enum_solo_chain(length):
-    """枚举所有单连顺，并附加权重
-    length 是连顺的张数，如5连
-    """
-    if length < 5 or length > 12:
-        raise ValueError('chain length is in [5,12]')
-
-    chain_range = [(5, 8), (12, 1)]
-    count = chain_range[0][1] - (length - chain_range[0][0])
-
-    def solo_chain_x():
-        return [(cards2str(CARDS[i:i + length]), i) for i in range(count)]
-
-    return solo_chain_x
-
-
-def enum_pair():
-    """枚举所有的对子"""
-    return [(cards2str(pair), w) for w, pair in enumerate(CARD_PAIR)]
-
-
-def enum_pair_chain(length):
-    """枚举所有的连对"""
-    if length < 3 or length > 10:
-        raise ValueError('chain length is in [3,10]')
-
-    chain_range = [(3, 10), (10, 3)]
-    count = chain_range[0][1] - (length - chain_range[0][0])
-
-    def pair_chain_x():
-        solo_chain = [CARDS[i:i + length] for i in range(count)]
-        pair_chain = []
-        for w, sc in enumerate(solo_chain):
-            tmp = []
-            for c in sc:
-                tmp += [c, c]
-            pair_chain.append((cards2str(tmp), w))
-        return pair_chain
-
-    return pair_chain_x
-
-
-def enum_trio_chain(length):
-    """枚举所有的三张及连三"""
-    if length < 1 or length > 7:
-        raise ValueError('chain length is in [1,7]')
-
-    chain_range = [(1, 13), (6, 7)]
-    count = chain_range[0][1] - (length - chain_range[0][0])
-    if length >= 2:
-        # 2连以上不能用`2`
-        count -= 1
-
-    def trio_chain_x():
-        solo_chain = [CARDS[i:i + length] for i in range(count)]
-        trio_chain = []
-        for w, sc in enumerate(solo_chain):
-            tmp = []
-            for c in sc:
-                tmp += [c] * 3
-            trio_chain.append((cards2str(tmp), w))
-        return trio_chain
-
-    return trio_chain_x
-
-
-def enum_trio_solo():
-    """枚举所有的三带一"""
-    result = []
-    weight = 0
-    for trio in CARD_TRIO:
-        weight += 1
-        all_cards = [card for card in CARDS if card != trio[0]]
-        for card in all_cards:
-            put_sorted_cards(result, trio + [card], weight)
-
-    logger.debug('trio_solo: {}'.format(len(result)))
-    return result
-
-
-def enum_trio_solo_chain(length):
-    """x 连三连一"""
-    if length < 2 or length > 5:
-        raise ValueError('chain length is in [2,5]')
-
-    def trio_solo_chain_x():
-        result = []
-        weight = 0
-        solo_chain = [CARDS[i:i + length] for i in range(13 - length)]
-        for chain in solo_chain:
-            weight += 1
-            trio_chain = order_repeat(chain, 3)
-            avail_cards = [c for c in CARDS_NO_JOKERS if c not in set(chain)]
-
-            # 1. select {BJ, CJ}
-            it = itertools.combinations_with_replacement(avail_cards, length - 2)
-            for e in it:
-                kicker = list(e) + ['BJ', 'CJ']
-                put_sorted_cards(result, trio_chain + kicker, weight)
-            # 2. select BJ
-            it = itertools.combinations_with_replacement(avail_cards, length - 1)
-            for e in it:
-                kicker = list(e) + ['BJ']
-                put_sorted_cards(result, trio_chain + kicker, weight)
-            # 3. select CJ
-            it = itertools.combinations_with_replacement(avail_cards, length - 1)
-            for e in it:
-                kicker = list(e) + ['CJ']
-                put_sorted_cards(result, trio_chain + kicker, weight)
-            # 4. do not select {BJ, CJ}
-            it = itertools.combinations_with_replacement(avail_cards, length)
-            for e in it:
-                if length == 5 and len(set(e)) == 1:
-                    continue
-                kicker = list(e)
-                put_sorted_cards(result, trio_chain + kicker, weight)
-
-        logger.debug('trio_solo_chain_{}: {}'.format(length, len(result)))
-        return result
-
-    return trio_solo_chain_x
-
-
-def enum_trio_pair_chain(length):
-    """x 连三连一对"""
-    if length < 1 or length > 4:
-        raise ValueError('chain length is in [1,4]')
-
-    def check_repeat_num(arr, limit):
-        """
-            arr中每个元素最多重复的次数是limit
-            如果超过limit，返回True
-        """
-        for i, e in enumerate(arr):
-            count = 0
-            for j in range(i, len(arr)):
-                if e == arr[j]:
-                    count += 1
-                    if count > limit:
-                        return True
-        return False
-
-    def trio_pair_chain_x():
-        result = []
-        weight = 0
-        if length == 1:
-            solo_chain = [[e] for e in CARDS_NO_JOKERS]
-        else:
-            solo_chain = [CARDS[i:i + length] for i in range(13 - length)]
-
-        for chain in solo_chain:
-            weight += 1
-            trio_chain = order_repeat(chain, 3)
-            avail_cards = [c for c in CARDS_NO_JOKERS if c not in set(chain)]
-
-            it = itertools.combinations_with_replacement(avail_cards, length)
-            for e in it:
-                if length == 3 and len(set(e)) == 1:
-                    # 排除3对重复的情形
-                    continue
-                if length == 4 and len(set(e)) <= 2 and check_repeat_num(e, 2):
-                    # 排除3对或4对重复的情形
-                    continue
-                kicker = order_repeat(list(e), 2)
-                put_sorted_cards(result, trio_chain + kicker, weight)
-
-        logger.debug('trio_solo_chain_{}: {}'.format(length, len(result)))
-        return result
-
-    return trio_pair_chain_x
-
-
-def enum_four_two_solo():
-    """四带二单"""
-    result = []
-    weight = 0
-    for four in CARD_FOUR:
-        weight += 1
-        all_cards = [card for card in CARDS if card != four[0]]
-        it = itertools.combinations_with_replacement(all_cards, 2)
-        for e in it:
-            if e not in [('BJ', 'BJ'), ('CJ', 'CJ')]:
-                put_sorted_cards(result, four + list(e), weight)
-    logger.debug('four_solo: {}'.format(len(result)))
-    return result
-
-
-def enum_four_two_pair():
-    """四带二对"""
-    result = []
-    weight = 0
-    for four in CARD_FOUR:
-        weight += 1
-        all_cards = [card for card in CARDS_NO_JOKERS if card != four[0]]
-        it = itertools.combinations_with_replacement(all_cards, 2)
-        for e in it:
-            put_sorted_cards(result, four + order_repeat(e, 2), weight)
-    logger.debug('four_pair: {}'.format(len(result)))
-    return result
-
-
-def enum_bomb():
-    """枚举所有的炸弹"""
-    return [(cards2str(four), w) for w, four in enumerate(CARD_FOUR)]
-
-
-def enum_rocket():
-    """返回王炸"""
-    return [('BJ-CJ', 0)]
-
-
-class Doudizhu(object):
-    """枚举所有牌型，生成花色无关、顺序无关字典
-    提供的接口:
-    - 规则检查
-    - 牌型大小比较
-    - 可出牌提示
-    """
-    CARD_TYPE = [
-        {'name': 'solo', 'zh_name': u'单牌',
-         'func': enum_solo, 'size': 15},
-        {'name': 'solo_chain_5', 'zh_name': u'顺子5连',
-         'func': enum_solo_chain(5), 'size': 8},
-        {'name': 'solo_chain_6', 'zh_name': u'顺子6连',
-         'func': enum_solo_chain(6), 'size': 7},
-        {'name': 'solo_chain_7', 'zh_name': u'顺子7连',
-         'func': enum_solo_chain(7), 'size': 6},
-        {'name': 'solo_chain_8', 'zh_name': u'顺子8连',
-         'func': enum_solo_chain(8), 'size': 5},
-        {'name': 'solo_chain_9', 'zh_name': u'顺子9连',
-         'func': enum_solo_chain(9), 'size': 4},
-        {'name': 'solo_chain_10', 'zh_name': u'顺子10连',
-         'func': enum_solo_chain(10), 'size': 3},
-        {'name': 'solo_chain_11', 'zh_name': u'顺子11连',
-         'func': enum_solo_chain(11), 'size': 2},
-        {'name': 'solo_chain_12', 'zh_name': u'顺子12连',
-         'func': enum_solo_chain(12), 'size': 1},
-
-        {'name': 'pair', 'zh_name': u'对子',
-         'func': enum_pair, 'size': 13},
-        {'name': 'pair_chain_3', 'zh_name': u'连对3连',
-         'func': enum_pair_chain(3), 'size': 10},
-        {'name': 'pair_chain_4', 'zh_name': u'连对4连',
-         'func': enum_pair_chain(4), 'size': 9},
-        {'name': 'pair_chain_5', 'zh_name': u'连对5连',
-         'func': enum_pair_chain(5), 'size': 8},
-        {'name': 'pair_chain_6', 'zh_name': u'连对6连',
-         'func': enum_pair_chain(6), 'size': 7},
-        {'name': 'pair_chain_7', 'zh_name': u'连对7连',
-         'func': enum_pair_chain(7), 'size': 6},
-        {'name': 'pair_chain_8', 'zh_name': u'连对8连',
-         'func': enum_pair_chain(8), 'size': 5},
-        {'name': 'pair_chain_9', 'zh_name': u'连对9连',
-         'func': enum_pair_chain(9), 'size': 4},
-        {'name': 'pair_chain_10', 'zh_name': u'连对10连',
-         'func': enum_pair_chain(10), 'size': 3},
-
-        {'name': 'trio', 'zh_name': u'三张',
-         'func': enum_trio_chain(1), 'size': 13},
-        {'name': 'trio_chain_2', 'zh_name': u'连三2连',
-         'func': enum_trio_chain(2), 'size': 11},
-        {'name': 'trio_chain_3', 'zh_name': u'连三3连',
-         'func': enum_trio_chain(3), 'size': 10},
-        {'name': 'trio_chain_4', 'zh_name': u'连三4连',
-         'func': enum_trio_chain(4), 'size': 9},
-        {'name': 'trio_chain_5', 'zh_name': u'连三5连',
-         'func': enum_trio_chain(5), 'size': 8},
-        {'name': 'trio_chain_6', 'zh_name': u'连三6连',
-         'func': enum_trio_chain(6), 'size': 7},
-
-        {'name': 'trio_solo', 'zh_name': u'三带一',
-         'func': enum_trio_solo, 'size': 182},
-        {'name': 'trio_solo_chain_2', 'zh_name': u'连三带一2连',
-         'func': enum_trio_solo_chain(2), 'size': 979},
-        {'name': 'trio_solo_chain_3', 'zh_name': u'连三带一3连',
-         'func': enum_trio_solo_chain(3), 'size': 3400},
-        {'name': 'trio_solo_chain_4', 'zh_name': u'连三带一4连',
-         'func': enum_trio_solo_chain(4), 'size': 7830},
-        {'name': 'trio_solo_chain_5', 'zh_name': u'连三带一5连',
-         'func': enum_trio_solo_chain(5), 'size': 12512},
-
-        {'name': 'trio_pair', 'zh_name': u'三带一对',
-         'func': enum_trio_pair_chain(1), 'size': 156},
-        {'name': 'trio_pair_chain_2', 'zh_name': u'连三带一对2连',
-         'func': enum_trio_pair_chain(2), 'size': 726},
-        {'name': 'trio_pair_chain_3', 'zh_name': u'连三带一对3连',
-         'func': enum_trio_pair_chain(3), 'size': 2100},
-        {'name': 'trio_pair_chain_4', 'zh_name': u'连三带一对4连',
-         'func': enum_trio_pair_chain(4), 'size': 3726},
-
-        {'name': 'four_two_solo', 'zh_name': u'四带二单',
-         'func': enum_four_two_solo, 'size': 1339},
-        {'name': 'four_two_pair', 'zh_name': u'四带二对',
-         'func': enum_four_two_pair, 'size': 1014},
-
-        {'name': 'bomb', 'zh_name': u'炸弹',
-         'func': enum_bomb, 'size': 13},
-        {'name': 'rocket', 'zh_name': u'王炸',
-         'func': enum_rocket, 'size': 1},
-    ]
-
-    """
-        {cards: [(type, weight), ],}
-        value 使用list是为了解决冲突
-        - 如四带两对中的3-3-3-3-4-4-4-4和4-4-4-4-3-3-3-3
-        - 如3连三带一 3-3-3-4-4-4-5-5-5-6-6-6，也可作为四连三张
-
-        todo: covert the key to binary format
-    """
-    DATA = {}
-    """
-        {type:{weight:[cards,]},}
-    """
-    TYPE_CARDS = {}
-    TOTAL = 0
-    INIT_FLAG = False
-
-    @staticmethod
-    def init_doudizhu_dict():
-        if Doudizhu.INIT_FLAG:
+from __future__ import annotations
+
+import random
+import time
+from collections import Counter, OrderedDict
+from dataclasses import dataclass, field
+from enum import Enum
+
+from .api import check_card_type, cards_greater, hand_str, new_game
+from .cards import Card
+
+
+class State(str, Enum):
+    WAITING = "WAITING"
+    DEALING = "DEALING"
+    BIDDING = "BIDDING"
+    PLAYING = "PLAYING"
+    SETTLED = "SETTLED"
+
+
+class Err(str, Enum):
+    """错误码，网络层直接把它放进 error 帧。"""
+
+    BAD_STATE = "BAD_STATE"
+    NOT_YOUR_TURN = "NOT_YOUR_TURN"
+    ILLEGAL_BID = "ILLEGAL_BID"
+    INVALID_PLAY = "INVALID_PLAY"
+    NOT_IN_HAND = "NOT_IN_HAND"
+    CANNOT_PASS = "CANNOT_PASS"
+    NOT_ENOUGH_PLAYERS = "NOT_ENOUGH_PLAYERS"
+
+
+@dataclass
+class MatchConfig:
+    """一局的可调参数（默认值取自大纲 v7）。"""
+
+    bid_timeout_ms: int = 10_000
+    play_timeout_ms: int = 20_000
+    max_redeal: int = 3          # 连续全不叫的次数上限，超过则本局作废
+    base_score: int = 1
+    request_cache_size: int = 256
+    seat_count: int = 3
+
+
+@dataclass
+class Action:
+    """动作的处理结果。"""
+
+    ok: bool
+    code: Err | None = None
+    detail: str = ""
+    duplicate: bool = False
+
+
+@dataclass
+class Match:
+    players: list[str]
+    seed: int | None = None
+    config: MatchConfig = field(default_factory=MatchConfig)
+    clock: object = None  # Callable[[], int]，毫秒
+
+    def __post_init__(self) -> None:
+        self.cfg = self.config
+        if self.clock is None:
+            self.clock = lambda: int(time.monotonic() * 1000)  # noqa: E731
+        if len(self.players) != self.cfg.seat_count:
+            raise ValueError("当前只支持三人一桌")
+        self.state = State.WAITING
+        self.ready_set: set[str] = set()
+        self.hands: dict[str, list[int]] = {p: [] for p in self.players}
+        self.bottom: list[int] = []
+        self.bottom_revealed = False
+        self.landlord: str | None = None
+        self.current: str | None = None
+        self.bids: dict[str, int] = {}
+        self.bid_order: list[str] = []
+        self.table: list[int] = []
+        self.table_owner: str | None = None
+        self.passes = 0
+        self.multiplier = 1
+        self.bombs = 0
+        self.play_counts: dict[str, int] = {p: 0 for p in self.players}
+        self.history: list[dict] = []
+        self.result: dict | None = None
+        self.deadline_ms: int | None = None
+        self.events: list[dict] = []
+        self.deal_round = 0
+        self._requests: OrderedDict[str, Action] = OrderedDict()
+
+    # ------------------------------------------------------------ 查询 ----
+
+    @property
+    def landlord_side(self) -> list[str]:
+        return [p for p in self.players if p != self.landlord] if self.landlord else []
+
+    def hand_counts(self) -> dict[str, int]:
+        return {p: len(h) for p, h in self.hands.items()}
+
+    def _emit(self, **event) -> None:
+        event.setdefault("ts_ms", self.clock())
+        event.setdefault("state", self.state.value)
+        self.events.append(event)
+
+    def drain_events(self) -> list[dict]:
+        events, self.events = self.events, []
+        return events
+
+    # ------------------------------------------------------------ 生命周期 ----
+
+    def ready(self, player: str) -> Action:
+        """玩家准备；三人都准备好后自动发牌并进入叫分。"""
+        if self.state is not State.WAITING:
+            return Action(False, Err.BAD_STATE, f"当前状态 {self.state.value} 不能准备")
+        if player not in self.players:
+            return Action(False, Err.NOT_ENOUGH_PLAYERS, f"{player} 不在本桌")
+        self.ready_set.add(player)
+        self._emit(type="ready", player=player, ready=len(self.ready_set))
+        if len(self.ready_set) == len(self.players):
+            self._deal()
+        return Action(True)
+
+    def _deal(self) -> None:
+        self.state = State.DEALING
+        self.deal_round += 1
+        deal_seed = None if self.seed is None else self.seed + self.deal_round - 1
+        groups = new_game(deal_seed)
+        self.hands = {p: groups[i] for i, p in enumerate(self.players)}
+        self.bottom = groups[3]
+        self.bottom_revealed = False
+        self.table, self.table_owner, self.passes = [], None, 0
+        self.bids, self.bid_order = {}, []
+        self.multiplier = 1
+        self.bombs = 0
+        self.play_counts = {p: 0 for p in self.players}
+        self.landlord = None
+        self.result = None
+        self._emit(type="dealt", deal_round=self.deal_round, hand_counts=self.hand_counts())
+
+        first = random.Random(deal_seed if deal_seed is not None else self.clock()).randrange(
+            len(self.players)
+        )
+        self.bid_order = self.players[first:] + self.players[:first]
+        self.current = self.bid_order[0]
+        self.state = State.BIDDING
+        self.deadline_ms = self.clock() + self.cfg.bid_timeout_ms
+        self._emit(type="bid_start", first=self.current, order=list(self.bid_order))
+
+    def reset(self) -> None:
+        """一局结束后复位，可直接再开一局。"""
+        self.__post_init__()
+
+    # ------------------------------------------------------------ 叫分 ----
+
+    def bid(self, player: str, score: int, request_id: str | None = None) -> Action:
+        """叫分：0 表示不叫，1/2/3 必须高于当前最高分。"""
+        cached = self._cached(request_id)
+        if cached is not None:
+            return cached
+        if self.state is not State.BIDDING:
+            return Action(False, Err.BAD_STATE, f"当前状态 {self.state.value} 不能叫分")
+        if player != self.current:
+            return Action(False, Err.NOT_YOUR_TURN, f"现在轮到 {self.current}")
+        if score not in (0, 1, 2, 3):
+            return Action(False, Err.ILLEGAL_BID, "叫分只能是 0/1/2/3")
+        highest = max(self.bids.values(), default=0)
+        if score != 0 and score <= highest:
+            return Action(False, Err.ILLEGAL_BID, f"叫分必须高于当前最高分 {highest}")
+
+        self.bids[player] = score
+        self._emit(type="bid", player=player, score=score)
+        self._remember(request_id, Action(True))
+
+        if score == 3 or len(self.bids) == len(self.players):
+            self._decide_landlord()
+            return Action(True)
+
+        self._next_bidder()
+        return Action(True)
+
+    def _next_bidder(self) -> None:
+        remaining = [p for p in self.bid_order if p not in self.bids]
+        if not remaining:
+            self._decide_landlord()
             return
-        Doudizhu.INIT_FLAG = True
-        for ct in Doudizhu.CARD_TYPE:
-            rst = ct['func']()
-            if len(rst) != ct['size']:
-                logger.error(ct)
-            Doudizhu.TOTAL += len(rst)
+        self.current = remaining[0]
+        self.deadline_ms = self.clock() + self.cfg.bid_timeout_ms
 
-            card_type = ct['name']
-            Doudizhu.TYPE_CARDS[card_type] = {}
-            for item in rst:
-                cards, weight = item
-                if cards not in Doudizhu.DATA:
-                    Doudizhu.DATA[cards] = [(ct['name'], weight)]
-                else:
-                    Doudizhu.DATA[cards].append((ct['name'], weight))
+    def _decide_landlord(self) -> None:
+        best = max(self.bids.values(), default=0)
+        if best == 0:
+            if self.deal_round >= self.cfg.max_redeal:
+                self._emit(type="match_aborted", reason="无人叫分", deal_round=self.deal_round)
+                self.state = State.WAITING
+                self.ready_set.clear()
+                self.deadline_ms = None
+                return
+            self._emit(type="redeal", reason="三家都不叫")
+            self._deal()
+            return
 
-                if weight not in Doudizhu.TYPE_CARDS[card_type]:
-                    Doudizhu.TYPE_CARDS[card_type][weight] = [cards]
-                else:
-                    Doudizhu.TYPE_CARDS[card_type][weight].append(cards)
+        self.landlord = next(p for p in self.bid_order if self.bids.get(p) == best)
+        self.multiplier = best
+        self.bottom_revealed = True
+        self.hands[self.landlord] = Card.sort_cards_by_rank_int(
+            self.hands[self.landlord] + self.bottom
+        )
+        self.state = State.PLAYING
+        self.current = self.landlord
+        self.table, self.table_owner, self.passes = [], None, 0
+        self.deadline_ms = self.clock() + self.cfg.play_timeout_ms
+        self._emit(
+            type="landlord_decided",
+            landlord=self.landlord,
+            bid=best,
+            bottom=list(self.bottom),
+            hand_counts=self.hand_counts(),
+        )
 
-        logger.debug(Doudizhu.TOTAL)
+    # ------------------------------------------------------------ 出牌 ----
 
-    @staticmethod
-    def print_multiple_types_cards():
-        for cards, value in iter(Doudizhu.DATA.items()):
-            if len(value) > 2 or \
-                    (len(value) > 1 and value[0][0] != value[1][0]):
-                print(cards, value)
+    def play(self, player: str, cards: list[int], request_id: str | None = None) -> Action:
+        cached = self._cached(request_id)
+        if cached is not None:
+            return cached
+        if self.state is not State.PLAYING:
+            return Action(False, Err.BAD_STATE, f"当前状态 {self.state.value} 不能出牌")
+        if player != self.current:
+            return Action(False, Err.NOT_YOUR_TURN, f"现在轮到 {self.current}")
+        if not cards:
+            return Action(False, Err.INVALID_PLAY, "没有出牌")
+        if Counter(cards) - Counter(self.hands[player]):
+            return Action(False, Err.NOT_IN_HAND, "出的牌不在手牌里")
 
-    @staticmethod
-    def check_card_type(cards):
-        """cards is str type"""
-        if isinstance(cards, str):
-            cards = str2cards(cards)
-        if not isinstance(cards, list):
-            return False, None
-        sorted_cards = sort_cards(cards)
-        value = Doudizhu.DATA.get(cards2str(sorted_cards))
-        if value is None:
-            return False, ValueError('invalid card type')
+        ok, info = check_card_type(cards)
+        if not ok:
+            return Action(False, Err.INVALID_PLAY, f"牌型不合法：{info}")
+        if self.table:
+            greater, _ = cards_greater(cards, self.table)
+            if not greater:
+                return Action(False, Err.INVALID_PLAY, f"压不过 {hand_str(self.table)}")
 
-        return True, value
+        self._apply_play(player, cards)
+        self._remember(request_id, Action(True))
+        return Action(True)
 
-    @staticmethod
-    def type_greater(type_x, type_y):
-        """check if x is greater than y
-        type_x/y: (type, weight)
-          >0: x > y
-          =0: x = y
-          <0: x < y
-        """
-        if type_x[0] == type_y[0]:
-            return type_x[1] - type_y[1]
+    def pass_turn(self, player: str, request_id: str | None = None) -> Action:
+        """过牌；只有在别人出过牌（桌面非空）时才能过。"""
+        cached = self._cached(request_id)
+        if cached is not None:
+            return cached
+        if self.state is not State.PLAYING:
+            return Action(False, Err.BAD_STATE, f"当前状态 {self.state.value} 不能过牌")
+        if player != self.current:
+            return Action(False, Err.NOT_YOUR_TURN, f"现在轮到 {self.current}")
+        if not self.table:
+            return Action(False, Err.CANNOT_PASS, "你是本轮先手，必须出牌")
+
+        self._apply_pass(player)
+        self._remember(request_id, Action(True))
+        return Action(True)
+
+    def _apply_play(self, player: str, cards: list[int]) -> None:
+        hand = list(self.hands[player])
+        for card in cards:
+            hand.remove(card)
+        self.hands[player] = hand
+        self.play_counts[player] += 1
+        self.table = Card.sort_cards_by_rank_int(cards)
+        self.table_owner = player
+        self.passes = 0
+        self.history.append({"event": "play", "player": player, "cards": list(self.table)})
+
+        is_bomb = len(cards) == 4 and len({Card.get_rank_int(c) for c in cards}) == 1
+        is_rocket = len(cards) == 2 and all(Card.get_rank_int(c) >= 13 for c in cards)
+        if is_bomb or is_rocket:
+            self.bombs += 1
+            self.multiplier *= 2
+        self._emit(
+            type="play",
+            player=player,
+            cards=list(self.table),
+            cards_text=hand_str(self.table),
+            hand_count=len(hand),
+            bomb=is_bomb or is_rocket,
+            multiplier=self.multiplier,
+        )
+
+        if not hand:
+            self._settle(player)
+            return
+        self._advance(player)
+
+    def _apply_pass(self, player: str) -> None:
+        self.passes += 1
+        self.history.append({"event": "pass", "player": player})
+        self._emit(type="pass", player=player, passes=self.passes)
+        if self.passes >= 2:
+            self.table, self.table_owner, self.passes = [], None, 0
+            self.current = self._last_player(player)
+            self._emit(type="table_cleared", leader=self.current)
         else:
-            if type_x[0] == 'rocket':
-                return 1
-            elif type_y[0] == 'rocket':
-                return -1
-            elif type_x[0] == 'bomb':
-                return 1
+            self._advance(player)
+        self.deadline_ms = self.clock() + self.cfg.play_timeout_ms
 
-        return ValueError('Can not compare card type')
+    def _advance(self, player: str) -> None:
+        idx = self.players.index(player)
+        self.current = self.players[(idx + 1) % len(self.players)]
+        self.deadline_ms = self.clock() + self.cfg.play_timeout_ms
 
-    @staticmethod
-    def cards_greater(cards_x, cards_y):
-        """check if x is greater than y
-        x, y可能分别组成不同牌型
-        只要有x一种牌型大于y，就返回True和牌型
-        """
-        ok, type_x = Doudizhu.check_card_type(cards_x)
-        if not ok:
-            return False, '{}: {}'.format(cards_x, type_x)
+    def _last_player(self, fallback: str) -> str:
+        """最近一次真正出牌的玩家（用于两度过牌后重新领出）。"""
+        for item in reversed(self.history):
+            if item["event"] == "play":
+                return item["player"]
+        return fallback
 
-        ok, type_y = Doudizhu.check_card_type(cards_y)
-        if not ok:
-            return False, '{}: {}'.format(cards_y, type_y)
+    # ------------------------------------------------------------ 超时 ----
 
-        for tx in type_x:
-            for ty in type_y:
-                flag = Doudizhu.type_greater(tx, ty)
-                if not isinstance(flag, ValueError) and flag > 0:
-                    return True, tx[0]
-        return False, tx[0]
+    def tick(self, now_ms: int | None = None) -> Action | None:
+        """由服务端定时调用：到点就替当前玩家做动作。"""
+        if self.deadline_ms is None or self.state not in (State.BIDDING, State.PLAYING):
+            return None
+        now = self.clock() if now_ms is None else now_ms
+        if now < self.deadline_ms:
+            return None
+        return self.timeout()
 
-    @staticmethod
-    def cards_contain(candidate_cardmap, cardmap):
-        for k, v in iter(cardmap.items()):
-            if k not in candidate_cardmap:
-                return False
-            if candidate_cardmap[k] < v:
-                return False
-        return True
+    def timeout(self) -> Action:
+        """当前玩家超时：叫分视为不叫；跟牌视为过牌；先手自动出最小单张。"""
+        player = self.current
+        if player is None:
+            return Action(False, Err.BAD_STATE, "没有当前玩家")
+        if self.state is State.BIDDING:
+            self._emit(type="timeout", player=player, phase="BIDDING", action="不叫")
+            return self.bid(player, 0)
+        if self.state is State.PLAYING:
+            if self.table:
+                self._emit(type="timeout", player=player, phase="PLAYING", action="过牌")
+                return self.pass_turn(player)
+            smallest = min(self.hands[player], key=Card.get_rank_int)
+            self._emit(type="timeout", player=player, phase="PLAYING", action="自动出最小单张")
+            return self.play(player, [smallest])
+        return Action(False, Err.BAD_STATE, f"当前状态 {self.state.value} 无超时处理")
 
-    @staticmethod
-    def list_greater_cards(cards_target, cards_candidate):
-        """ 对于目标牌组合cards_target
-        从候选牌cards_candidate中找出所有可以压制它的牌型
+    # ------------------------------------------------------------ 结算 ----
 
-        1. 对于cards_taget同牌型的不同权重组合来说，按其最大权重计算
-        如target='3-3-3-3-2-2-2-2', candidate='5-5-5-5-6-6-6-6'),
-        这里target当作<四个2带2对3>，所以返回是：
-        {'bomb': ['5-5-5-5', '6-6-6-6']}
+    def _settle(self, winner: str) -> None:
+        landlord_win = winner == self.landlord
+        spring = landlord_win and all(
+            self.play_counts[p] == 0 for p in self.landlord_side
+        )
+        if spring:
+            self.multiplier *= 2
+        total = self.cfg.base_score * self.multiplier
+        scores = {p: -total for p in self.players}
+        scores[self.landlord] = -2 * total
+        if landlord_win:
+            scores[self.landlord] = 2 * total
+            for p in self.landlord_side:
+                scores[p] = -total
+        else:
+            for p in self.landlord_side:
+                scores[p] = total
 
-        2. 对于candidate中一组牌可作不同组合压制cards_taget的场景，只返回一种组合
-        如target='3-3-3-3-4-4-4-4', candidate='5-5-5-5-6-6-6-6'),
-        <四个5带2对6>，<四个6带2对5> 均大于 <四个4带2对3>
-        只返回一次'5-5-5-5-6-6-6-6',
-        {'bomb': ['5-5-5-5', '6-6-6-6'], 'four_two_pair': ['5-5-5-5-6-6-6-6']}
-        """
-        ok, target_type = Doudizhu.check_card_type(cards_target)
-        if not ok:
-            logger.error('{}: {}'.format(cards_target, target_type))
-            return {}
+        self.state = State.SETTLED
+        self.deadline_ms = None
+        self.result = {
+            "winner": winner,
+            "landlord": self.landlord,
+            "landlord_win": landlord_win,
+            "spring": spring,
+            "bombs": self.bombs,
+            "multiplier": self.multiplier,
+            "scores": scores,
+        }
+        self._emit(
+            type="game_over",
+            winner=winner,
+            landlord_win=landlord_win,
+            spring=spring,
+            bombs=self.bombs,
+            multiplier=self.multiplier,
+            scores=scores,
+        )
 
-        # 对target_type去重，保留同type中weight最大的
-        tmp_dict = {}
-        for card_type, weight in target_type:
-            if card_type not in tmp_dict or weight > tmp_dict[card_type]:
-                tmp_dict[card_type] = weight
-        target_type = [(k, v) for k, v in iter(tmp_dict.items())]
+    # ------------------------------------------------------------ 视图 ----
 
-        # 如果目标牌型为rocket，则一定打不过，直接返回空
-        if target_type[0][0] == 'rocket':
-            return {}
+    def view_for(self, player: str | None) -> dict:
+        """给某个玩家的视图；player 为 None 时返回观战视图（不含任何手牌）。"""
+        view = self.public_view()
+        if player in self.players:
+            view["you"] = player
+            view["hand"] = list(self.hands[player])
+            view["hand_text"] = hand_str(self.hands[player])
+        return view
 
-        # 按牌型大小依次判断是否可用bomb, rocket
-        if target_type[0][0] != 'rocket':
-            if target_type[0][0] != 'bomb':
-                target_type.append(('bomb', -1))
-            target_type.append(('rocket', -1))
-        elif target_type[0][0] != 'bomb':
-            target_type.append(('bomb', -1))
+    def public_view(self) -> dict:
+        return {
+            "state": self.state.value,
+            "players": list(self.players),
+            "landlord": self.landlord,
+            "current": self.current,
+            "hand_counts": self.hand_counts(),
+            "bottom": list(self.bottom) if self.bottom_revealed else [],
+            "bottom_revealed": self.bottom_revealed,
+            "table": list(self.table),
+            "table_owner": self.table_owner,
+            "bids": dict(self.bids),
+            "multiplier": self.multiplier,
+            "bombs": self.bombs,
+            "deadline_ms": self.deadline_ms,
+            "result": self.result,
+            "deal_round": self.deal_round,
+        }
 
-        logger.debug('target_type: {}'.format(target_type))
-        candidate_cardmap = str2cardmap(cards_candidate)
-        cards_gt = {}
-        for card_type, weight in target_type:
-            weight_gt = [w for w in Doudizhu.TYPE_CARDS[card_type].keys()
-                         if w > weight]
-            if card_type not in cards_gt:
-                cards_gt[card_type] = []
-            logger.debug(weight_gt)
-            logger.debug(candidate_cardmap)
-            for w in sorted(weight_gt):
-                for w_cards in Doudizhu.TYPE_CARDS[card_type][w]:
-                    w_cardmap = str2cardmap(w_cards)
-                    if Doudizhu.cards_contain(candidate_cardmap, w_cardmap) \
-                            and w_cards not in cards_gt[card_type]:
-                        cards_gt[card_type].append(w_cards)
-            if not cards_gt[card_type]:
-                cards_gt.pop(card_type)
-        return cards_gt
+    # ------------------------------------------------------------ 幂等 ----
+
+    def _cached(self, request_id: str | None) -> Action | None:
+        if not request_id:
+            return None
+        hit = self._requests.get(request_id)
+        if hit is None:
+            return None
+        self._requests.move_to_end(request_id)
+        return Action(ok=hit.ok, code=hit.code, detail=hit.detail, duplicate=True)
+
+    def _remember(self, request_id: str | None, action: Action) -> None:
+        if not request_id:
+            return
+        self._requests[request_id] = action
+        self._requests.move_to_end(request_id)
+        while len(self._requests) > self.cfg.request_cache_size:
+            self._requests.popitem(last=False)

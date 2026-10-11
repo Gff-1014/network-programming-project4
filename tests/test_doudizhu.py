@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """移植自 onestraw/doudizhu 的 tests/test_doudizhu.py（MIT）。
 
-仅修改导入路径：doudizhu -> game.engine
+仅修改导入路径：doudizhu -> game.rules
 这些用例覆盖牌型枚举一致性、牌型识别、大小比较与可压牌列表，
 是移植后判断"规则引擎有没有被改坏"的主要依据。
 """
 
 import unittest
 
-from game.engine import Doudizhu
+from game.rules import Doudizhu
 
 
 class TestDoudizhu(unittest.TestCase):

@@ -34,7 +34,7 @@ def test_hand_sorted_desc():
 
 def test_facade_matches_engine_on_random_plays():
     """门面接口与上游引擎在随机对局中给出一致结论。"""
-    from game.engine import Doudizhu
+    from game.rules import Doudizhu
 
     rng_hands = game.new_game(seed=99)
     hand = rng_hands[0]
