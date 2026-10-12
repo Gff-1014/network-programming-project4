@@ -244,6 +244,9 @@ class ChatApp(tk.Tk):
     def do_pass(self) -> None:
         self.call(self.session.pass_turn(), "过牌失败")
 
+    def toggle_auto(self) -> None:
+        self.call(self.session.set_auto(not self.session.auto_play), "切换托管失败")
+
     def do_hint(self) -> None:
         """出牌提示：本地用规则引擎算一手能出的牌（不依赖服务端）。"""
         from game.text import parse_card
@@ -445,6 +448,7 @@ class TableFrame(BaseFrame):
             ("play", "出牌", app.do_play),
             ("pass", "过牌", app.do_pass),
             ("hint", "提示", app.do_hint),
+            ("auto", "托管", app.toggle_auto),
         ):
             button = ttk.Button(actions, text=text, command=command)
             button.pack(side="left", padx=4)
@@ -492,6 +496,14 @@ class TableFrame(BaseFrame):
         my_turn = session.my_turn
         in_match = state_name in ("BIDDING", "PLAYING")
         self.buttons["ready"].state(["!disabled"] if not in_match and session.role == "player" else ["disabled"])
+        auto_button = self.buttons["auto"]
+        auto_button.configure(text="取回控制" if session.auto_play else "托管")
+        auto_button.state(
+            ["!disabled"] if session.role == "player" and in_match else ["disabled"]
+        )
+        auto_names = state.get("auto_players") or []
+        if session.nickname in auto_names:
+            self.app.current_var.set(f"{self.app.current_var.get()}　（我托管中）")
         for key in ("bid0", "bid1", "bid2", "bid3"):
             enabled = state_name == "BIDDING" and my_turn and session.role == "player"
             self.buttons[key].state(["!disabled"] if enabled else ["disabled"])

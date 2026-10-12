@@ -31,6 +31,7 @@ C2S_TYPES = (
     "pass",
     "spectate",
     "game_state",
+    "auto_play",
     "room_msg",
     "private_msg",
 )

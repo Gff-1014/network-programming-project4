@@ -33,6 +33,7 @@ class Table:
         self.spectators: dict[str, "Session"] = {}        # conn_id -> 会话
         self.match: Match | None = None
         self.ready_set: set[str] = set()
+        self.auto_players: set[str] = set()   # 在线托管：没掉线但交给服务端自动打
         self._last_turn: str | None = None
         self._turn_started_ms = now_ms()
 
@@ -95,6 +96,7 @@ class Table:
         nickname = self.session_of(session)
         if nickname is not None:
             self.seats[nickname] = None
+            self.auto_players.add(nickname)
             self.room.broadcast(
                 make("table_state", self.public_state() | {"auto": nickname}), droppable=True
             )
@@ -105,6 +107,7 @@ class Table:
         if nickname not in self.seats:
             return False
         self.seats[nickname] = session
+        self.auto_players.discard(nickname)   # 回来即取回控制
         if self.match is not None:
             session.send(make("game_state", self.view_for(nickname)))
         return True
@@ -121,6 +124,11 @@ class Table:
         nickname = self.session_of(session)
         if nickname is None:
             return Action(False, Err.BAD_STATE, "你不在牌桌座位上")
+        # 上一局已结算：清掉旧对局，等三家重新准备再开新一局
+        if self.match is not None and self.match.state is State.SETTLED:
+            self.match = None
+            self.ready_set = set()
+            self._last_turn = None
         if self.match is not None and self.match.state is not State.WAITING:
             return Action(True)  # 已经开局，重复准备视为成功
         self.ready_set.add(nickname)
@@ -145,6 +153,18 @@ class Table:
             if not action.ok:
                 return action
         self._flush_events()
+        return Action(True)
+
+    def set_auto(self, session: "Session", enabled: bool) -> Action:
+        """在线托管开关：托管期间服务端替这位玩家决策，随时可取回。"""
+        nickname = self.session_of(session)
+        if nickname is None:
+            return Action(False, Err.BAD_STATE, "你不在牌桌座位上")
+        if enabled:
+            self.auto_players.add(nickname)
+        else:
+            self.auto_players.discard(nickname)
+        self.broadcast(make("table_state", self.public_state()), droppable=True)
         return Action(True)
 
     def bid(self, session: "Session", score: int, request_id: str | None) -> Action:
@@ -196,7 +216,8 @@ class Table:
 
         if self.match.state in (State.BIDDING, State.PLAYING):
             seated = self.seats.get(current) if current else None
-            if seated is None:  # 断线托管：轮到自己 1 秒后自动决策
+            auto = seated is None or current in self.auto_players
+            if auto:  # 断线或在线托管：轮到自己 1 秒后自动决策
                 if now - self._turn_started_ms >= self.cfg.auto_play_delay_ms:
                     self.match.timeout()
                     self._flush_events()
@@ -245,6 +266,7 @@ class Table:
         view["room"] = self.room.name
         view["seats"] = [{"nickname": n, "online": self.seats.get(n) is not None}
                          for n in self.seats]
+        view["auto_players"] = sorted(self.auto_players)
         view["spectators"] = len(self.spectators)
         return view
 

@@ -50,6 +50,21 @@ class DoudizhuBot:
         assert self.result is not None
         return self.result
 
+    async def run_forever(self, rounds: int | None = None) -> None:
+        """一直坐在牌桌上：每局结束自动再准备，供"AI 陪打"使用。"""
+        await self.join_and_ready()
+        played = 0
+        while True:
+            await self.finished.wait()
+            played += 1
+            if rounds is not None and played >= rounds:
+                return
+            self.finished = asyncio.Event()
+            self.result = None
+            self._action_key = None
+            await asyncio.sleep(0.3)
+            await self.conn.request("room_ready", {})
+
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()

@@ -27,6 +27,7 @@ class ClientSession:
         self.room_users: list[str] = []
         self.hand: list[int] = []
         self.table: dict[str, Any] = {}
+        self.auto_play = False
         self.log: list[str] = []
         self.error: str | None = None
         self._pump_task: asyncio.Task | None = None
@@ -139,6 +140,14 @@ class ClientSession:
         assert self.conn is not None
         await self.conn.request("game_state", {})
 
+    async def set_auto(self, enabled: bool) -> None:
+        """在线托管开关。"""
+        assert self.conn is not None
+        await self.conn.request("auto_play", {"enabled": enabled})
+        self.auto_play = enabled
+        self._note("已开启托管，轮到我时服务端会自动出牌" if enabled else "已取回控制")
+        self.on_event("auto_play", {"enabled": enabled})
+
     # ------------------------------------------------------------ 收消息 ----
 
     async def _handle(self, kind: str, data: dict) -> None:
@@ -154,6 +163,8 @@ class ClientSession:
             self._note(f"手牌 {len(self.hand)} 张: {cards_text(self.hand)}")
         elif kind == "table_state":
             self.table = data
+            if self.nickname:
+                self.auto_play = self.nickname in (data.get("auto_players") or [])
         elif kind == "landlord":
             self.table["landlord"] = data.get("landlord")
             self._note(f"{data.get('landlord')} 成为地主，底牌 {data.get('bottom_text')}")

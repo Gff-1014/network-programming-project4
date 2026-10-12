@@ -190,6 +190,70 @@ async def test_disconnected_player_is_auto_played(server_factory):
         await conn.close()
 
 
+async def test_table_plays_a_second_game(server):
+    """一局结束后，三家重新准备应能开新的一局。"""
+    conns = [await Connection.connect(server.host, server.port) for _ in range(3)]
+    bots = []
+    for index, conn in enumerate(conns):
+        await conn.login(f"again{index}")
+        bots.append(DoudizhuBot(f"again{index}", conn, ROOM))
+    for bot in bots:
+        await bot.join_and_ready()
+
+    await asyncio.wait_for(asyncio.gather(*(bot.play_until_end(30) for bot in bots)), 45)
+    table = server.hub.rooms[ROOM].table
+    assert table.match.state.value == "SETTLED"
+    first_match = table.match
+
+    for bot in bots:
+        bot.finished = asyncio.Event()
+        bot.result = None
+        bot._action_key = None
+        await bot.conn.request("room_ready", {})
+
+    # 机器人打得很快，第二局可能瞬间就打完了；关键是"换了新的一局"且能正常结算
+    results = await asyncio.wait_for(
+        asyncio.gather(*(bot.play_until_end(30) for bot in bots)), 45
+    )
+    assert table.match is not first_match, "第二局应当是新的对局对象"
+    assert sum(results[0]["scores"].values()) == 0
+
+
+async def test_online_auto_play_takes_over_my_turn(server_factory):
+    """在线托管：人还在线，但轮到他时由服务端自动出牌。"""
+    server = await server_factory(auto_play_delay_ms=150, sweep_interval_ms=100)
+    conns, _ = await make_seated(server, ["t0", "t1", "t2"])
+    await ready_all(conns)
+    for conn in conns:
+        await conn.wait_for("game_start", timeout=3.0)
+
+    state = await conns[0].wait_for("table_state", timeout=3.0, match={"state": "BIDDING"})
+    first = state["data"]["current"]
+    index = ["t0", "t1", "t2"].index(first)
+    landlord_conn = conns[index]
+    await landlord_conn.request("bid", {"score": 3})
+    for conn in conns:
+        await conn.wait_for("landlord", timeout=3.0)
+
+    # 地主开启托管后不再自己出牌
+    await landlord_conn.request("auto_play", {"enabled": True})
+    table = server.hub.rooms[ROOM].table
+    before = len(table.match.history)
+    for _ in range(40):
+        if len(table.match.history) > before:
+            break
+        await asyncio.sleep(0.1)
+    assert len(table.match.history) > before, "托管后服务端应自动替他行动"
+    assert first in table.auto_players
+    assert table.seats[first] is not None, "在线托管不掉座（座位仍绑定着在线会话）"
+
+    # 取回控制后不再自动打
+    await landlord_conn.request("auto_play", {"enabled": False})
+    assert first not in table.auto_players
+    for conn in conns:
+        await conn.close()
+
+
 async def test_resume_into_table_restores_hand(server):
     """断线后用 token 回到牌桌：昵称、房间、手牌都要恢复。"""
     conns, tokens = [], []

@@ -302,3 +302,18 @@ async def on_spectate(session, data: dict, request_id: str | None) -> None:
         session.send(error(ErrCode.BAD_STATE, "牌桌还有空位，请直接加入房间入座", request_id))
         return
     await on_join_room(session, {"room": room_name}, request_id)
+
+
+@register("auto_play")
+async def on_auto_play(session, data: dict, request_id: str | None) -> None:
+    """在线托管开关：不下线也能把这一局交给服务端自动打，随时可以取回。"""
+    table = _table_of(session)
+    if table is None:
+        session.send(error(ErrCode.BAD_STATE, "当前房间不是牌桌", request_id))
+        return
+    enabled = bool(data.get("enabled", True))
+    action = table.set_auto(session, enabled)
+    if not action.ok:
+        _action_error(session, action, request_id)
+        return
+    session.send(make("ok", {"action": "auto_play", "enabled": enabled}, request_id))

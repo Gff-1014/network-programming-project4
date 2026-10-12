@@ -33,7 +33,14 @@ Python 3.12。`requirements.txt` 只有 pytest（测试用），运行时无第�
 
 # 4) 运行全部测试
 .venv\Scripts\python.exe -m pytest -q
+
+# 5) AI 陪打：让两个 AI 占住牌桌，自己用窗口客户端打第三个座位
+.venv\Scripts\python.exe bots\fill_seats.py --room 牌桌3 --ai 2
+.venv\Scripts\python.exe -m client --nickname me --auto-login --room 牌桌3
 ```
+
+牌桌上三个按钮的用法：**准备**（三人齐且都准备即发牌）、**提示**（本地用规则引擎算一手可出的牌）、
+**托管 / 取回控制**（交给服务端自动打，随时取回；掉线时也会自动托管，回来后自动取回）。
 
 房间：`大厅`（登录后自动进入，不可退出）、`聊天房`、`牌桌1/2/3`（三人一桌，每桌可 2 人观战）。
 端口与上限可以在环境变量里覆盖，例如 `DDZ_PORT=9022`、`DDZ_MAX_FRAME_BYTES=131072`。
