@@ -293,9 +293,34 @@ async def test_log_line_comes_with_its_own_event():
     assert lines == [
         "[叫分] a 叫 1 分",
         "[叫分] b 不叫",
-        "[出牌] a: 3　剩 16 张",
+        "[出牌] a: 3",
         "[过牌] b",
     ], "同一批事件必须各自带自己的那行日志"
+
+
+async def test_log_shows_remaining_only_when_close_to_finish():
+    """出牌记录平时不带剩余张数，只在剩 ≤3 张时提示。"""
+    session = ClientSession()
+    lines: list[str] = []
+    session.on_event = lambda kind, data: lines.append(data["_line"]) if data.get("_line") else None
+
+    await session._handle("play", {"player": "a", "cards_text": "3", "hand_count": 10})
+    await session._handle("play", {"player": "a", "cards_text": "4", "hand_count": 3})
+    await session._handle("play", {"player": "b", "cards_text": "5", "hand_count": 1})
+
+    assert lines == ["[出牌] a: 3", "[出牌] a: 4　剩 3 张", "[出牌] b: 5　剩 1 张"]
+
+
+def test_jokers_are_displayed_in_chinese():
+    """牌局记录里大小王显示为中文，协议编码仍是 BJ/CJ。"""
+    from game.text import card_code, card_text, cards_text, parse_card
+
+    big = parse_card("CJ")
+    small = parse_card("BJ")
+    assert card_text(small) == "小王"
+    assert card_text(big) == "大王"
+    assert cards_text([small, big]) == "小王 大王"
+    assert card_code(small) == "BJ" and card_code(big) == "CJ"
 
 
 async def test_resume_into_table_restores_hand(server):

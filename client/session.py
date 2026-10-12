@@ -183,8 +183,11 @@ class ClientSession:
                     if card in self.hand:
                         self.hand.remove(card)
             bomb = "（炸弹）" if data.get("bomb") else ""
-            line = (f"[出牌] {data.get('player')}: {data.get('cards_text')}{bomb}"
-                    f"　剩 {data.get('hand_count')} 张")
+            line = f"[出牌] {data.get('player')}: {data.get('cards_text')}{bomb}"
+            # 只在对手快走完时提示剩余张数，避免每手都刷一遍
+            remaining = data.get("hand_count")
+            if isinstance(remaining, int) and remaining <= 3:
+                line += f"　剩 {remaining} 张"
         elif kind == "pass":
             line = f"[过牌] {data.get('player')}"
         elif kind == "table_cleared":

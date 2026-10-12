@@ -6,12 +6,14 @@ from .cards import Card
 
 SUITS = {1: "♠", 2: "♥", 4: "♦", 8: "♣", 0: ""}
 RED_SUITS = {2, 4}
+# 展示用：大小王用中文名，协议编码仍然是 BJ / CJ（见 card_code）
+RANK_DISPLAY = {"BJ": "小王", "CJ": "大王"}
 
 
 def card_text(card_int: int) -> str:
-    """单张牌的可读文本，如 '♥A'、'CJ'。"""
+    """单张牌的可读文本，如 '♥A'、'大王'。"""
     rank = Card.STR_RANKS[Card.get_rank_int(card_int)]
-    return f"{SUITS.get(Card.get_suit_int(card_int), '')}{rank}"
+    return RANK_DISPLAY.get(rank) or f"{SUITS.get(Card.get_suit_int(card_int), '')}{rank}"
 
 
 def cards_text(cards) -> str:
