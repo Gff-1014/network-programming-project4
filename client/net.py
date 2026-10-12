@@ -32,10 +32,11 @@ class ServerError(Exception):
 
 class Connection:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                 max_frame_bytes: int = 65536) -> None:
+                 max_frame_bytes: int = 65536, auto_pong: bool = True) -> None:
         self.reader = reader
         self.writer = writer
         self.max_frame_bytes = max_frame_bytes
+        self.auto_pong = auto_pong   # 自动回应服务端心跳；测试判活时可关掉
         self._ids = itertools.count(1)
         self._buffer: list[dict] = []                         # 收到但暂时用不上的推送
         self._inbox: asyncio.Queue[dict] = asyncio.Queue()    # 未被请求认领的推送
@@ -48,6 +49,9 @@ class Connection:
         try:
             while True:
                 frame = await read_frame(self.reader, self.max_frame_bytes)
+                if frame.get("type") == "ping" and self.auto_pong:
+                    self.writer.write(encode_frame({"type": "pong", "data": {}}))
+                    await self.writer.drain()
                 request_id = frame.get("request_id")
                 waiter = self._waiters.pop(request_id, None) if request_id else None
                 if waiter is not None and not waiter.done():
@@ -64,6 +68,8 @@ class Connection:
         for waiter in list(self._waiters.values()):
             if not waiter.done():
                 waiter.set_exception(ConnectionError("连接已关闭"))
+                # 若没人 await 这个 future，取一次异常避免 asyncio 打"never retrieved"告警
+                waiter.add_done_callback(lambda f: f.exception())
         self._waiters.clear()
         self._inbox.put_nowait({"type": "_closed", "data": {}})
 
@@ -71,9 +77,9 @@ class Connection:
 
     @classmethod
     async def connect(cls, host: str = "127.0.0.1", port: int = 9011,
-                      max_frame_bytes: int = 65536) -> "Connection":
+                      max_frame_bytes: int = 65536, auto_pong: bool = True) -> "Connection":
         reader, writer = await asyncio.open_connection(host, port)
-        return cls(reader, writer, max_frame_bytes)
+        return cls(reader, writer, max_frame_bytes, auto_pong)
 
     async def close(self) -> None:
         if self.closed:
@@ -157,6 +163,9 @@ class Connection:
 
     async def login(self, nickname: str, timeout: float = 5.0) -> dict:
         return await self.request("login", {"nickname": nickname}, timeout)
+
+    async def resume(self, token: str, timeout: float = 5.0) -> dict:
+        return await self.request("resume", {"token": token}, timeout)
 
     async def join_room(self, room: str, timeout: float = 5.0) -> dict:
         return await self.request("join_room", {"room": room}, timeout)

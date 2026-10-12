@@ -50,9 +50,33 @@ evidence/        验证记录
 | 里程碑 | 内容 | 状态 |
 | --- | --- | --- |
 | M0 | 分帧 + 多客户端 + 在线列表 + 房间广播 | 完成（10 客户端 100% 到达） |
-| M1 | 队列背压策略 + 心跳判活 + 断线清理 + token 重连 | 待开始 |
+| M1 | 队列背压策略 + 心跳判活 + 断线清理 + token 重连 | 完成（慢客户端对照实验通过） |
 | M2 | 斗地主引擎接入网络 + Tkinter 客户端 | 引擎与状态机已完成，待接入 |
 | M3 | 观战 + 故障注入 + 对照实验 + 文档归档 | 待开始 |
+
+## 六、可调参数（环境变量）
+
+| 变量 | 默认 | 说明 |
+| --- | ---: | --- |
+| `DDZ_HOST` / `DDZ_PORT` | 127.0.0.1 / 9011 | 监听地址 |
+| `DDZ_MAX_FRAME_BYTES` | 65536 | 单帧上限 |
+| `DDZ_SEND_QUEUE_MAX` | 128 | 每连接发送队列条数上限 |
+| `DDZ_SEND_QUEUE_MAX_BYTES` | 65536 | 每连接发送队列字节上限 |
+| `DDZ_SLOW_CONSUMER_DROP_LIMIT` | 50 | 窗口内丢弃多少条判定慢客户端 |
+| `DDZ_SLOW_CONSUMER_WINDOW_MS` | 10000 | 慢客户端判定窗口 |
+| `DDZ_PING_INTERVAL_MS` | 10000 | 静默多久后服务端主动 ping |
+| `DDZ_IDLE_TIMEOUT_MS` | 30000 | 静默多久判定失效 |
+| `DDZ_SWEEP_INTERVAL_MS` | 5000 | 心跳扫描周期 |
+| `DDZ_RECONNECT_GRACE_MS` | 60000 | 重连宽限期 |
+| `DDZ_HANDSHAKE_TIMEOUT_MS` | 10000 | 握手超时 |
+| `DDZ_MAX_TEXT_CHARS` | 500 | 单条文本上限 |
+
+慢客户端对照实验（另开终端）：
+
+```powershell
+.venv\Scripts\python.exe bots\run_bots.py --clients 10 --rounds 40 --payload 480 --slow 0
+.venv\Scripts\python.exe bots\run_bots.py --clients 10 --rounds 40 --payload 480 --slow 1
+```
 
 ## 五、参考项目
 

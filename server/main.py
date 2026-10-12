@@ -15,13 +15,31 @@ if __package__ in (None, ""):  # 允许 `python server/main.py` 直接运行
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 
 from config import settings  # noqa: E402
-from server import handlers  # noqa: E402,F401  导入即注册处理器
+from server import handlers, protocol  # noqa: E402,F401  导入即注册处理器
 from server.hub import Hub  # noqa: E402
 from server.session import Session  # noqa: E402
 
 logger = logging.getLogger("server")
 
 _conn_counter = itertools.count(1)
+
+
+async def heartbeat_sweeper(hub: Hub) -> None:
+    """心跳与清理：静默就发 ping，彻底静默就清理，顺带回收过期的重连预约。"""
+    cfg = hub.cfg
+    while True:
+        await asyncio.sleep(cfg.sweep_interval_ms / 1000)
+        now = protocol.now_ms()
+        for session in list(hub.sessions.values()):
+            if session.closed:
+                continue
+            idle = now - session.last_seen_ms
+            if idle >= cfg.ping_interval_ms and now - session.last_ping_ms >= cfg.ping_interval_ms:
+                session.ping()
+            if idle >= cfg.idle_timeout_ms:
+                logger.info("[%s] 静默 %d ms，判定失效", session.conn_id, idle)
+                await session.close_for_idle()
+        hub.sweep_reservations()
 
 
 async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -55,12 +73,14 @@ async def serve() -> None:
     server = await asyncio.start_server(
         lambda r, w: handle_connection(r, w, hub), settings.host, settings.port
     )
+    sweeper = asyncio.create_task(heartbeat_sweeper(hub))
     print(f"服务端已启动: {settings.host}:{settings.port}", flush=True)
     print(f"本机可用地址: {', '.join(local_addresses()) or '未检测到'}", flush=True)
     print(f"房间: {[room.name for room in hub.rooms.values()]}", flush=True)
     print(f"分帧: 4 字节长度前缀，单帧上限 {settings.max_frame_bytes} 字节", flush=True)
     async with server:
         await server.serve_forever()
+    sweeper.cancel()
 
 
 def main() -> None:

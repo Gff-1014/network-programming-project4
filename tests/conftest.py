@@ -10,7 +10,7 @@ import pytest_asyncio
 
 from config import settings
 from server.hub import Hub
-from server.main import handle_connection
+from server.main import handle_connection, heartbeat_sweeper
 
 
 @dataclass
@@ -30,6 +30,7 @@ async def server_factory():
     """启动服务端工厂：`await server_factory(handshake_timeout_ms=200)`。"""
     started: list[asyncio.AbstractServer] = []
     handles: list[ServerHandle] = []
+    sweepers: list[asyncio.Task] = []
 
     async def start(**overrides) -> ServerHandle:
         cfg = dataclasses.replace(settings, **overrides)
@@ -38,6 +39,8 @@ async def server_factory():
             lambda r, w: handle_connection(r, w, hub), "127.0.0.1", 0
         )
         started.append(srv)
+        # 与真实服务端一致：同时启动心跳/清理任务
+        sweepers.append(asyncio.create_task(heartbeat_sweeper(hub)))
         port = srv.sockets[0].getsockname()[1]
         handle = ServerHandle("127.0.0.1", port, hub, cfg)
         handles.append(handle)
@@ -49,6 +52,8 @@ async def server_factory():
         # 先关掉残留会话，否则连接处理协程不结束，wait_closed() 会一直等
         for handle in handles:
             await handle.hub.close_all("test teardown")
+        for task in sweepers:
+            task.cancel()
         for srv in started:
             srv.close()
         await asyncio.gather(

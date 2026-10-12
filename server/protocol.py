@@ -18,6 +18,8 @@ from typing import Awaitable, Callable
 # 客户端 → 服务端
 C2S_TYPES = (
     "login",
+    "resume",
+    "pong",
     "logout",
     "ping",
     "list_rooms",
@@ -30,7 +32,9 @@ C2S_TYPES = (
 # 服务端 → 客户端推送
 S2C_TYPES = (
     "welcome",
+    "resumed",
     "error",
+    "ping",
     "pong",
     "room_list",
     "joined",
@@ -39,6 +43,7 @@ S2C_TYPES = (
     "room_msg_ack",
     "user_joined",
     "user_left",
+    "user_reconnecting",
     "room_msg",
     "private_msg",
 )
@@ -63,6 +68,8 @@ class ErrCode(str):
     BAD_MESSAGE = "BAD_MESSAGE"
     TOO_MANY_BAD_FRAMES = "TOO_MANY_BAD_FRAMES"
     SLOW_CONSUMER = "SLOW_CONSUMER"
+    SESSION_EXPIRED = "SESSION_EXPIRED"
+    ALREADY_LOGGED_IN = "ALREADY_LOGGED_IN"
 
 
 # ------------------------------------------------------------------ 构造函数 ----

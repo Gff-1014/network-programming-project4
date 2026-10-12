@@ -49,7 +49,35 @@ async def on_login(session, data: dict, request_id: str | None) -> None:
 @register("logout")
 async def on_logout(session, data: dict, request_id: str | None) -> None:
     session.send(make("left", {"reason": "logout"}, request_id))
-    await session.close("logout")
+    await session.close("logout", keep_reservation=False)
+
+
+@register("resume")
+async def on_resume(session, data: dict, request_id: str | None) -> None:
+    """凭 token 恢复会话（握手阶段的第二个允许类型）。"""
+    if session.nickname is not None:
+        session.send(error(ErrCode.ALREADY_LOGGED_IN, "当前连接已登录", request_id))
+        return
+    token = data.get("token")
+    if not isinstance(token, str) or not token:
+        session.send(error(ErrCode.SESSION_EXPIRED, "缺少 token", request_id))
+        await session.close("resume without token", keep_reservation=False)
+        return
+
+    ok, code, message = session.hub.resume(session, token)
+    if not ok:
+        session.send(error(code or ErrCode.SESSION_EXPIRED, message or "恢复失败", request_id))
+        await session.close("resume failed", keep_reservation=False)
+        return
+
+    session.send(session.resumed_payload(request_id))
+    session.hub.broadcast_room_list()
+
+
+@register("pong")
+async def on_pong(session, data: dict, request_id: str | None) -> None:
+    """客户端对服务端 ping 的回应；last_seen 已在读循环里刷新，这里无需额外处理。"""
+    return
 
 
 @register("ping")

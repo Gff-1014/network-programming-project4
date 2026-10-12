@@ -33,6 +33,17 @@ class Settings:
 
     # 每连接发送队列（M0 先用固定上限，M1 补丢弃/断开策略与统计）
     send_queue_max: int = _env_int("DDZ_SEND_QUEUE_MAX", 128)
+    send_queue_max_bytes: int = _env_int("DDZ_SEND_QUEUE_MAX_BYTES", 65536)
+    slow_consumer_drop_limit: int = _env_int("DDZ_SLOW_CONSUMER_DROP_LIMIT", 50)
+    slow_consumer_window_ms: int = _env_int("DDZ_SLOW_CONSUMER_WINDOW_MS", 10_000)
+
+    # 心跳与判活：收到任意合法帧都刷新 last_seen；静默超过 idle 即清理
+    ping_interval_ms: int = _env_int("DDZ_PING_INTERVAL_MS", 10_000)
+    idle_timeout_ms: int = _env_int("DDZ_IDLE_TIMEOUT_MS", 30_000)
+    sweep_interval_ms: int = _env_int("DDZ_SWEEP_INTERVAL_MS", 5_000)
+
+    # 断线重连：宽限期内昵称保留，凭 token 恢复
+    reconnect_grace_ms: int = _env_int("DDZ_RECONNECT_GRACE_MS", 60_000)
 
     # 昵称限制
     max_nickname_chars: int = _env_int("DDZ_MAX_NICKNAME_CHARS", 32)

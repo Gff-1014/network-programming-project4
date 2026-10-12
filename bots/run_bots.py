@@ -11,7 +11,9 @@ import argparse
 import asyncio
 import random
 import statistics
+import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -23,6 +25,29 @@ except Exception:
     pass
 
 from client.net import Connection  # noqa: E402
+from server.framing import encode_frame  # noqa: E402
+
+
+def spawn_slow_client(host: str, port: int, nickname: str, room: str) -> threading.Thread:
+    """慢客户端：连上、登录、进房间，然后**永不读取**，用于对照实验。"""
+
+    def worker() -> None:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+            sock.connect((host, port))
+            sock.sendall(encode_frame({"type": "login", "data": {"nickname": nickname},
+                                       "request_id": "slow-1"}))
+            time.sleep(0.3)
+            sock.sendall(encode_frame({"type": "join_room", "data": {"room": room},
+                                       "request_id": "slow-2"}))
+            time.sleep(3600)
+        except Exception as exc:  # pragma: no cover
+            print(f"[慢客户端] 异常: {exc}")
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    return thread
 
 
 class Bot:
@@ -75,7 +100,7 @@ class Bot:
         self.stats["sent_at"][marker] = time.perf_counter()
         self.stats["sent"] += 1
         try:
-            await self.conn.room_msg(f"压测 {marker}")
+            await self.conn.room_msg(f"{marker} " + "x" * self.args.payload)
         except Exception as exc:
             print(f"[{self.nick}] 发送失败: {type(exc).__name__}: {exc!r}")
             self.stats["errors"] = self.stats.get("errors", 0) + 1
@@ -84,6 +109,12 @@ class Bot:
         if self.task:
             self.task.cancel()
         if self.conn:
+            # 主动退出：服务端会立即释放昵称，不会进入重连保留期
+            try:
+                await asyncio.wait_for(self.conn.send("logout"), 1.0)
+                await asyncio.sleep(0.05)
+            except Exception:
+                pass
             await self.conn.close()
 
 
@@ -104,6 +135,8 @@ async def main() -> int:
     parser.add_argument("--interval", type=float, default=0.05)
     parser.add_argument("--drain", type=float, default=2.0)
     parser.add_argument("--prefix", default="bot")
+    parser.add_argument("--payload", type=int, default=0, help="每条消息追加的填充字符数")
+    parser.add_argument("--slow", type=int, default=0, help="注入几个只连不读的慢客户端")
     args = parser.parse_args()
 
     run_id = "".join(random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(4))
@@ -116,6 +149,13 @@ async def main() -> int:
     print(f"同时在线: {online}/{args.clients}")
     if online < args.clients:
         print("提示：有客户端没连上，后面的到达率会偏低")
+
+    for index in range(args.slow):
+        # 带 run 后缀：异常断开的昵称会保留 60 秒，重复用同名会导致登录被拒
+        spawn_slow_client(args.host, args.port, f"slow{index}-{run_id}", args.room)
+    if args.slow:
+        print(f"已注入 {args.slow} 个慢客户端（只连不读）")
+        await asyncio.sleep(0.5)
 
     for index in range(args.rounds):
         await asyncio.gather(*(bot.say(index, run_id) for bot in bots if bot.conn))
@@ -140,3 +180,4 @@ async def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
+
