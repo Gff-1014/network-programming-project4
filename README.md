@@ -31,6 +31,9 @@ Python 3.12。`requirements.txt` 只有 pytest（测试用），运行时无第�
 .venv\Scripts\python.exe -m client
 .venv\Scripts\python.exe -m client --nickname demoA --auto-login --room 牌桌1 --auto-ready
 
+# 3d) 界面皮肤：默认 CustomTkinter 现代外观；--ui classic 回到美化前的界面
+.venv\Scripts\python.exe -m client --ui classic
+
 # 4) 运行全部测试
 .venv\Scripts\python.exe -m pytest -q
 

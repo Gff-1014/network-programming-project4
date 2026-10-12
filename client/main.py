@@ -16,10 +16,19 @@ def main() -> None:
     parser.add_argument("--auto-login", action="store_true", help="启动后自动连接")
     parser.add_argument("--room", default="", help="登录后自动进入的房间（如 牌桌1）")
     parser.add_argument("--auto-ready", action="store_true", help="进入牌桌后自动准备（演示用）")
+    parser.add_argument("--ui", choices=["ctk", "classic"], default=None,
+                        help="界面皮肤：ctk=CustomTkinter（默认），classic=美化前的界面")
     args = parser.parse_args()
 
+    if args.ui:
+        import os
+
+        os.environ["DDZ_UI"] = args.ui   # 必须在导入 client.app 之前生效
+
+    from . import app as app_module  # noqa: E402
+
     bridge = AsyncBridge()
-    app = ChatApp(
+    app = app_module.ChatApp(
         bridge,
         host=args.host,
         port=args.port,

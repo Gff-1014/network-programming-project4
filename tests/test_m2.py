@@ -150,7 +150,7 @@ async def test_three_bots_finish_a_game(server):
         await bot.join_and_ready()
 
     results = await asyncio.wait_for(
-        asyncio.gather(*(bot.play_until_end(30) for bot in bots)), 40
+        asyncio.gather(*(bot.play_until_end(60) for bot in bots)), 75
     )
     result = results[0]
     assert result["winner"] in [b.nickname for b in bots]

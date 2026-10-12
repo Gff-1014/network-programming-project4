@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import queue
+import os
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -17,12 +18,24 @@ from .bridge import AsyncBridge
 from .cards_view import COLOR_TABLE_BG, HandCanvas, TableCanvas
 from .session import ClientSession
 
+# ====================== [UI-CTK] 界面美化开关（整块可回滚） ======================
+# 本次美化新增的全部代码在 client/ui_ctk.py；这里只做"选哪套界面"的判断。
+# 回滚：启动加 --ui classic / 设 DDZ_UI=classic，或直接删除 ui_ctk.py。
+try:
+    from . import ui_ctk
+
+    UI_CTK_ENABLED = ui_ctk.available() and os.environ.get("DDZ_UI", "ctk").lower() != "classic"
+except Exception:  # pragma: no cover - 未装依赖或文件被删时退回经典界面
+    ui_ctk = None
+    UI_CTK_ENABLED = False
+# ==============================================================================
+
 FONT_UI = ("Microsoft YaHei UI", 10)
 FONT_TITLE = ("Microsoft YaHei UI", 12, "bold")
 FONT_LOG = ("Microsoft YaHei UI", 9)
 
 
-class ChatApp(tk.Tk):
+class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
     def __init__(self, bridge: AsyncBridge, host: str = "127.0.0.1", port: int = 9011,
                  nickname: str = "", auto_login: bool = False, auto_room: str = "",
                  auto_ready: bool = False) -> None:
@@ -47,16 +60,30 @@ class ChatApp(tk.Tk):
 
         self.container = ttk.Frame(self)
         self.container.pack(fill="both", expand=True)
-        self.frames: dict[str, ttk.Frame] = {
-            "connect": ConnectFrame(self.container, self),
-            "lobby": LobbyFrame(self.container, self),
-            "room": RoomFrame(self.container, self),
-            "table": TableFrame(self.container, self),
-        }
+        if UI_CTK_ENABLED:  # [UI-CTK] CustomTkinter 皮肤
+            ui_ctk.apply_theme()
+            ui_ctk.style_ttk(ttk.Style())
+            self.container.configure(style="Ctk.TFrame")
+            self.frames = {
+                "connect": ui_ctk.ConnectFrame(self.container, self),
+                "lobby": ui_ctk.LobbyFrame(self.container, self),
+                "room": ui_ctk.RoomFrame(self.container, self),
+                "table": ui_ctk.make_table_frame()(self.container, self),
+            }
+        else:  # 经典皮肤（本次美化之前的样子）
+            self.frames = {
+                "connect": ConnectFrame(self.container, self),
+                "lobby": LobbyFrame(self.container, self),
+                "room": RoomFrame(self.container, self),
+                "table": TableFrame(self.container, self),
+            }
         for frame in self.frames.values():
             frame.place(relx=0, rely=0, relwidth=1, relheight=1)
 
-        ttk.Label(self, textvariable=self.status_var, anchor="w").pack(fill="x", side="bottom")
+        status = ttk.Label(self, textvariable=self.status_var, anchor="w")
+        if UI_CTK_ENABLED:  # [UI-CTK]
+            status.configure(style="Ctk.TLabel")
+        status.pack(fill="x", side="bottom")
         self.show("connect")
         self.after(50, self._drain_events)
         self.after(200, self._tick_countdown)
@@ -403,73 +430,116 @@ class RoomFrame(BaseFrame):
 
 
 class TableFrame(BaseFrame):
+    """牌桌视图：布局与渲染逻辑固定，控件创建集中在 `_build_*` 钩子里。
+
+    这样换皮肤（见 client/ui_ctk.py）只需覆写钩子，不用改一行业务逻辑。
+    """
+
     def __init__(self, parent, app: ChatApp) -> None:
         super().__init__(parent, app)
+        self._build_header()
+        self._build_seats()
+        self._build_center()
+        self._build_chat()
+        self._build_hand()
+        self._build_actions()
+        self._apply_theme()
+
+    # ------------------------------------------------- 控件创建（换皮肤处） ----
+
+    def _build_header(self) -> None:
         header = ttk.Frame(self)
         header.pack(fill="x")
+        self.header_frame = header
         self.title_var = tk.StringVar(value="牌桌")
         ttk.Label(header, textvariable=self.title_var, font=FONT_TITLE).pack(side="left")
-        ttk.Label(header, textvariable=app.multiplier_var, font=FONT_UI).pack(side="left", padx=12)
-        ttk.Label(header, textvariable=app.current_var, font=FONT_UI).pack(side="left")
-        ttk.Button(header, text="离开牌桌", command=app.do_leave).pack(side="right")
+        ttk.Label(header, textvariable=self.app.multiplier_var, font=FONT_UI).pack(side="left", padx=12)
+        ttk.Label(header, textvariable=self.app.current_var, font=FONT_UI).pack(side="left")
+        self.btn_leave = ttk.Button(header, text="离开牌桌", command=self.app.do_leave)
+        self.btn_leave.pack(side="right")
 
-        # 对手信息
+    def _build_seats(self) -> None:
         seats = ttk.Frame(self)
         seats.pack(fill="x", pady=6)
+        self.seats_frame = seats
         self.seat_vars: list[tk.StringVar] = []
+        self.seat_labels: list[ttk.Label] = []
         for index in range(3):
             var = tk.StringVar(value=f"座位 {index + 1}：等待玩家…")
-            ttk.Label(seats, textvariable=var, font=FONT_UI, relief="groove", padding=6,
-                      anchor="center", justify="center").pack(
+            label = ttk.Label(seats, textvariable=var, font=FONT_UI, relief="groove", padding=6,
+                              anchor="center", justify="center")
+            label.pack(
                 side="left", fill="x", expand=True, padx=4
             )
             self.seat_vars.append(var)
+            self.seat_labels.append(label)
 
+    def _build_center(self) -> None:
         middle = ttk.Frame(self)
         middle.pack(fill="both", expand=True)
+        self.middle_frame = middle
         self.table_canvas = TableCanvas(middle)
         self.table_canvas.pack(fill="x", pady=(0, 6))
         self.log_box = tk.Text(middle, font=FONT_LOG, height=12, state="disabled", wrap="word")
         self.log_box.pack(fill="both", expand=True, pady=6)
+        self._configure_log_tags()
+
+    def _configure_log_tags(self) -> None:
         self.log_box.tag_configure("chat", foreground="#1A1A1A")
         self.log_box.tag_configure("me", foreground="#2F6FED")
         self.log_box.tag_configure("system", foreground="#808080")
         self.log_box.tag_configure("alert", foreground="#C0392B")
 
-        # 牌局内聊天：默认发到房间，也可以只发给某个人
+    def _build_chat(self) -> None:
+        """牌局内聊天：默认发到房间，也可以只发给某个人。"""
         chat_row = ttk.Frame(self)
         chat_row.pack(fill="x", pady=(6, 0))
+        self.chat_row = chat_row
         self.chat_target = ttk.Combobox(chat_row, values=["（发到房间）"], width=14, state="readonly")
         self.chat_target.current(0)
         self.chat_target.pack(side="left")
-        chat_entry = ttk.Entry(chat_row, textvariable=app.chat_var, font=FONT_UI)
+        chat_entry = ttk.Entry(chat_row, textvariable=self.app.chat_var, font=FONT_UI)
         chat_entry.pack(side="left", fill="x", expand=True, padx=6)
         chat_entry.bind("<Return>", lambda _event: self.send_chat())
         ttk.Button(chat_row, text="发送", command=self.send_chat).pack(side="left")
         self.chat_entry = chat_entry
 
+    def _build_hand(self) -> None:
         hand_box = ttk.LabelFrame(self, text="我的手牌（点击选牌）", padding=6)
         hand_box.pack(fill="x")
+        self.hand_box = hand_box
         self.hand_canvas = HandCanvas(hand_box, on_toggle=self._toggle)
         self.hand_canvas.pack(fill="x")
 
+    def _build_actions(self) -> None:
         actions = ttk.Frame(self)
         actions.pack(fill="x", pady=8)
+        self.actions_frame = actions
         self.buttons: dict[str, ttk.Button] = {}
         for key, text, command in (
-            ("ready", "准备", app.do_ready),
-            ("bid0", "不叫", lambda: app.do_bid(0)),
-            ("bid1", "1 分", lambda: app.do_bid(1)),
-            ("bid2", "2 分", lambda: app.do_bid(2)),
-            ("bid3", "3 分", lambda: app.do_bid(3)),
-            ("play", "出牌", app.do_play),
-            ("pass", "过牌", app.do_pass),
-            ("hint", "提示", app.do_hint),
-            ("auto", "托管", app.toggle_auto),
+            ("ready", "准备", self.app.do_ready),
+            ("bid0", "不叫", lambda: self.app.do_bid(0)),
+            ("bid1", "1 分", lambda: self.app.do_bid(1)),
+            ("bid2", "2 分", lambda: self.app.do_bid(2)),
+            ("bid3", "3 分", lambda: self.app.do_bid(3)),
+            ("play", "出牌", self.app.do_play),
+            ("pass", "过牌", self.app.do_pass),
+            ("hint", "提示", self.app.do_hint),
+            ("auto", "托管", self.app.toggle_auto),
         ):
             button = ttk.Button(actions, text=text, command=command)
             button.pack(side="left", padx=4)
             self.buttons[key] = button
+
+    def _apply_theme(self) -> None:
+        """经典皮肤：不改配色（CustomTkinter 皮肤在 ui_ctk.py 里覆写）。"""
+        return
+
+    def _set_button_enabled(self, key: str, enabled: bool) -> None:
+        self.buttons[key].state(["!disabled"] if enabled else ["disabled"])
+
+    def _set_button_text(self, key: str, text: str) -> None:
+        self.buttons[key].configure(text=text)
 
     # ------------------------------------------------------------ 渲染 ----
 
@@ -530,21 +600,18 @@ class TableFrame(BaseFrame):
         state_name = state.get("state", "WAITING")
         my_turn = session.my_turn
         in_match = state_name in ("BIDDING", "PLAYING")
-        self.buttons["ready"].state(["!disabled"] if not in_match and session.role == "player" else ["disabled"])
-        auto_button = self.buttons["auto"]
-        auto_button.configure(text="取回控制" if session.auto_play else "托管")
-        auto_button.state(
-            ["!disabled"] if session.role == "player" and in_match else ["disabled"]
-        )
+        self._set_button_enabled("ready", not in_match and session.role == "player")
+        self._set_button_text("auto", "取回控制" if session.auto_play else "托管")
+        self._set_button_enabled("auto", session.role == "player" and in_match)
         auto_names = state.get("auto_players") or []
         if session.nickname in auto_names:
             self.app.current_var.set(f"{self.app.current_var.get()}　（我托管中）")
         for key in ("bid0", "bid1", "bid2", "bid3"):
             enabled = state_name == "BIDDING" and my_turn and session.role == "player"
-            self.buttons[key].state(["!disabled"] if enabled else ["disabled"])
+            self._set_button_enabled(key, enabled)
         for key in ("play", "pass", "hint"):
             enabled = state_name == "PLAYING" and my_turn and session.role == "player"
-            self.buttons[key].state(["!disabled"] if enabled else ["disabled"])
+            self._set_button_enabled(key, enabled)
 
     def append_log(self, text: str) -> None:
         self.append_line(text)

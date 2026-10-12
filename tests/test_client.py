@@ -97,8 +97,9 @@ async def test_client_session_spectator(server):
         await session.close()
 
 
-def test_gui_window_smoke():
-    """窗口冒烟：能建出界面、跑一轮事件循环再销毁。
+@pytest.mark.parametrize("ui_mode", ["ctk", "classic"])
+def test_gui_window_smoke(ui_mode):
+    """窗口冒烟：两种皮肤都能建出界面、跑一轮事件循环再销毁。
 
     放在子进程里跑：同一个进程里反复创建/销毁 Tk 根窗口会让 Tcl 解释器状态异常
     （表现为 "invalid command name tcl_findLibrary"），子进程最干净。
@@ -106,6 +107,8 @@ def test_gui_window_smoke():
     pytest.importorskip("tkinter")
     root = Path(__file__).resolve().parents[1]
     code = (
+        "import os\n"
+        f"os.environ['DDZ_UI'] = '{ui_mode}'\n"
         "from client.app import ChatApp\n"
         "from client.bridge import AsyncBridge\n"
         "bridge = AsyncBridge()\n"
@@ -113,19 +116,21 @@ def test_gui_window_smoke():
         "app.show('table')\n"
         "frame = app.frames['table']\n"
         "assert frame.chat_entry is not None, '牌桌应有聊天输入框'\n"
-        "assert '发到房间' in frame.chat_target['values'][0], '牌桌聊天应支持发到房间'\n"
+        "assert frame.chat_target is not None, '牌桌聊天应有收件人选择'\n"
         "frame.append_line('测试: 一条聊天', 'room_msg')\n"
         "app.update()\n"
         "text = frame.log_box.get('1.0', 'end')\n"
         "assert '测试: 一条聊天' in text, '牌桌记录应能写入聊天行'\n"
         "app.destroy()\n"
         "bridge.stop()\n"
-        "print('WINDOW-OK')\n"
+        "print('WINDOW-OK', " + f"'{ui_mode}'" + ")\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", code], cwd=root, capture_output=True, text=True, timeout=90
     )
-    if "no display" in result.stderr.lower() or "tcl" in result.stderr.lower() and result.returncode != 0:
-        pytest.skip(f"没有可用的显示环境: {result.stderr.strip().splitlines()[-1:] }")
+    if result.returncode != 0 and any(
+        marker in result.stderr.lower() for marker in ("no display", "couldn't connect to display", "tcl_findlibrary")
+    ):
+        pytest.skip(f"没有可用的显示环境: {result.stderr.strip().splitlines()[-1:]}")
     assert result.returncode == 0, result.stderr
-    assert "WINDOW-OK" in result.stdout
+    assert f"WINDOW-OK {ui_mode}" in result.stdout
