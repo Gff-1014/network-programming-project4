@@ -11,15 +11,14 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from game import ai
-from game.cards import Card
-from game.text import card_text, is_red
+from game.text import parse_card
 
 from .bridge import AsyncBridge
+from .cards_view import COLOR_TABLE_BG, HandCanvas, TableCanvas
 from .session import ClientSession
 
 FONT_UI = ("Microsoft YaHei UI", 10)
 FONT_TITLE = ("Microsoft YaHei UI", 12, "bold")
-FONT_CARD = ("Segoe UI Symbol", 14, "bold")
 FONT_LOG = ("Microsoft YaHei UI", 9)
 
 
@@ -424,18 +423,15 @@ class TableFrame(BaseFrame):
 
         middle = ttk.Frame(self)
         middle.pack(fill="both", expand=True)
-        self.table_var = tk.StringVar(value="桌面：（空）")
-        ttk.Label(middle, textvariable=self.table_var, font=("Segoe UI Symbol", 16, "bold")).pack(anchor="w", pady=4)
-        self.bottom_var = tk.StringVar(value="")
-        ttk.Label(middle, textvariable=self.bottom_var, font=("Segoe UI Symbol", 13)).pack(anchor="w", pady=2)
+        self.table_canvas = TableCanvas(middle)
+        self.table_canvas.pack(fill="x", pady=(0, 6))
         self.log_box = tk.Text(middle, font=FONT_LOG, height=12, state="disabled", wrap="word")
         self.log_box.pack(fill="both", expand=True, pady=6)
 
         hand_box = ttk.LabelFrame(self, text="我的手牌（点击选牌）", padding=6)
         hand_box.pack(fill="x")
-        self.hand_frame = ttk.Frame(hand_box)
-        self.hand_frame.pack(fill="x")
-        self.hand_labels: list[tk.Label] = []
+        self.hand_canvas = HandCanvas(hand_box, on_toggle=self._toggle)
+        self.hand_canvas.pack(fill="x")
 
         actions = ttk.Frame(self)
         actions.pack(fill="x", pady=8)
@@ -462,28 +458,11 @@ class TableFrame(BaseFrame):
         self.render_state()
 
     def render_hand(self) -> None:
-        for label in self.hand_labels:
-            label.destroy()
-        self.hand_labels = []
         session = self.app.session
-        if session.role == "spectator":
-            ttk.Label(self.hand_frame, text="观战中（看不到任何人的手牌）", font=FONT_UI).pack(side="left")
-            return
-        for card in session.hand:
-            selected = card in self.app.selected
-            label = tk.Label(
-                self.hand_frame,
-                text=card_text(card),
-                font=FONT_CARD,
-                width=4,
-                relief="sunken" if selected else "raised",
-                bg="#ffe9a8" if selected else "white",
-                fg="red" if is_red(card) else "black",
-                borderwidth=2,
-            )
-            label.pack(side="left", padx=1, pady=2)
-            label.bind("<Button-1>", lambda _event, c=card: self._toggle(c))
-            self.hand_labels.append(label)
+        self.hand_canvas.set_cards(
+            [] if session.role == "spectator" else session.hand,
+            self.app.selected,
+        )
 
     def _toggle(self, card: int) -> None:
         if card in self.app.selected:
@@ -495,9 +474,11 @@ class TableFrame(BaseFrame):
     def render_state(self) -> None:
         session = self.app.session
         state = session.table
-        self.table_var.set(f"桌面：{session.table_cards_text}")
-        bottom = state.get("bottom_text") or ""
-        self.bottom_var.set(f"底牌：{bottom}" if bottom else "")
+        self.table_canvas.set_state(
+            [parse_card(code) for code in state.get("table") or []],
+            [parse_card(code) for code in state.get("bottom") or []],
+            state.get("table_owner"),
+        )
         self.app.multiplier_var.set(f"倍数 ×{state.get('multiplier', 1)}")
 
         others = [name for name in state.get("players", []) if name != session.nickname]

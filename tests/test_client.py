@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -95,21 +98,27 @@ async def test_client_session_spectator(server):
 
 
 def test_gui_window_smoke():
-    """窗口冒烟：能建出界面、连上服务端并把大厅推上来。"""
-    tk = pytest.importorskip("tkinter")
-    from client.app import ChatApp
-    from client.bridge import AsyncBridge
+    """窗口冒烟：能建出界面、跑一轮事件循环再销毁。
 
-    try:
-        root_probe = tk.Tk()
-    except tk.TclError as exc:  # pragma: no cover - 无显示环境
-        pytest.skip(f"没有可用的显示环境: {exc}")
-    root_probe.destroy()
-
-    bridge = AsyncBridge()
-    app = ChatApp(bridge)
-    try:
-        app.update()          # 建好界面
-        app.destroy()         # 直接收尾，验证构造/销毁无异常
-    finally:
-        bridge.stop()
+    放在子进程里跑：同一个进程里反复创建/销毁 Tk 根窗口会让 Tcl 解释器状态异常
+    （表现为 "invalid command name tcl_findLibrary"），子进程最干净。
+    """
+    pytest.importorskip("tkinter")
+    root = Path(__file__).resolve().parents[1]
+    code = (
+        "from client.app import ChatApp\n"
+        "from client.bridge import AsyncBridge\n"
+        "bridge = AsyncBridge()\n"
+        "app = ChatApp(bridge)\n"
+        "app.update()\n"
+        "app.destroy()\n"
+        "bridge.stop()\n"
+        "print('WINDOW-OK')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=root, capture_output=True, text=True, timeout=90
+    )
+    if "no display" in result.stderr.lower() or "tcl" in result.stderr.lower() and result.returncode != 0:
+        pytest.skip(f"没有可用的显示环境: {result.stderr.strip().splitlines()[-1:] }")
+    assert result.returncode == 0, result.stderr
+    assert "WINDOW-OK" in result.stdout
