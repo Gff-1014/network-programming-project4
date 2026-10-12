@@ -311,6 +311,42 @@ async def test_log_shows_remaining_only_when_close_to_finish():
     assert lines == ["[出牌] a: 3", "[出牌] a: 4　剩 3 张", "[出牌] b: 5　剩 1 张"]
 
 
+async def test_chat_works_inside_a_table(server):
+    """牌局内也能聊天：房间广播与私信都要能收到，并写进牌桌记录。"""
+    session = ClientSession()
+    await session.connect(server.host, server.port)
+    await session.login("talker")
+    await session.join_room(ROOM)
+
+    other = await Connection.connect(server.host, server.port)
+    await other.login("mate")
+    await other.join_room(ROOM)
+
+    await session.say("大家好")
+    await asyncio.sleep(0.3)
+    assert "我: 大家好" in session.log, "自己发的聊天应显示为“我: …”"
+
+    await other.request("room_msg", {"text": "收到"})
+    await asyncio.sleep(0.3)
+    assert "mate: 收到" in session.log, "牌桌上应能收到别人的聊天"
+
+    await session.whisper("mate", "只跟你说")
+    await asyncio.sleep(0.3)
+    assert "（私信）我 → mate: 只跟你说" in session.log
+
+    # 对方也能收到，并且在对方视角里标注"→ 我"
+    other_log = ClientSession()
+    await other_log.connect(server.host, server.port)
+    await other_log.login("mate2")
+    await other_log.join_room(ROOM)
+    await session.whisper("mate2", "给你一条")
+    await asyncio.sleep(0.3)
+    assert "（私信）talker → 我: 给你一条" in other_log.log
+    await other_log.close()
+    await session.close()
+    await other.close()
+
+
 def test_jokers_are_displayed_in_chinese():
     """牌局记录里大小王显示为中文，协议编码仍是 BJ/CJ。"""
     from game.text import card_code, card_text, cards_text, parse_card

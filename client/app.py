@@ -431,6 +431,22 @@ class TableFrame(BaseFrame):
         self.table_canvas.pack(fill="x", pady=(0, 6))
         self.log_box = tk.Text(middle, font=FONT_LOG, height=12, state="disabled", wrap="word")
         self.log_box.pack(fill="both", expand=True, pady=6)
+        self.log_box.tag_configure("chat", foreground="#1A1A1A")
+        self.log_box.tag_configure("me", foreground="#2F6FED")
+        self.log_box.tag_configure("system", foreground="#808080")
+        self.log_box.tag_configure("alert", foreground="#C0392B")
+
+        # 牌局内聊天：默认发到房间，也可以只发给某个人
+        chat_row = ttk.Frame(self)
+        chat_row.pack(fill="x", pady=(6, 0))
+        self.chat_target = ttk.Combobox(chat_row, values=["（发到房间）"], width=14, state="readonly")
+        self.chat_target.current(0)
+        self.chat_target.pack(side="left")
+        chat_entry = ttk.Entry(chat_row, textvariable=app.chat_var, font=FONT_UI)
+        chat_entry.pack(side="left", fill="x", expand=True, padx=6)
+        chat_entry.bind("<Return>", lambda _event: self.send_chat())
+        ttk.Button(chat_row, text="发送", command=self.send_chat).pack(side="left")
+        self.chat_entry = chat_entry
 
         hand_box = ttk.LabelFrame(self, text="我的手牌（点击选牌）", padding=6)
         hand_box.pack(fill="x")
@@ -531,12 +547,44 @@ class TableFrame(BaseFrame):
             self.buttons[key].state(["!disabled"] if enabled else ["disabled"])
 
     def append_log(self, text: str) -> None:
+        self.append_line(text)
+
+    def append_line(self, text: str, kind: str = "") -> None:
         if not text:
             return
+        if kind == "room_msg":
+            tag = "me" if text.startswith("我:") else "chat"
+        elif kind == "private_msg":
+            tag = "chat"
+        elif kind in ("game_over", "error"):
+            tag = "alert"
+        elif kind in ("timeout", "user_reconnecting", "auto_play", "user_left", "user_joined"):
+            tag = "system"
+        else:
+            tag = "chat"
         self.log_box.configure(state="normal")
-        self.log_box.insert(tk.END, text + "\n")
+        self.log_box.insert(tk.END, text + "\n", tag)
         self.log_box.see(tk.END)
         self.log_box.configure(state="disabled")
+
+    def send_chat(self) -> None:
+        """把输入框内容发出去：下拉选"发到房间"走房间广播，否则发给选中的人。"""
+        text = self.app.chat_var.get().strip()
+        if not text:
+            return
+        target = self.chat_target.get()
+        self.app.chat_var.set("")
+        if target.startswith("（"):
+            self.app.call(self.app.session.say(text), "发送失败")
+        else:
+            self.app.call(self.app.session.whisper(target, text), "私信失败")
+
+    def refresh_chat_targets(self) -> None:
+        names = list(self.app.session.table.get("players") or [])
+        others = [name for name in names if name != self.app.session.nickname]
+        self.chat_target.configure(values=["（发到房间）"] + others)
+        if self.chat_target.get() not in self.chat_target["values"]:
+            self.chat_target.current(0)
 
     def on_event(self, kind: str, data: dict) -> None:
         if kind in ("table_state", "landlord", "game_start", "hand", "play",
@@ -553,5 +601,8 @@ class TableFrame(BaseFrame):
                     f"赢家：{data.get('winner')}\n我的得分：{mine:+d}" if mine is not None else f"赢家：{data.get('winner')}",
                 )
         if kind in ("landlord", "bid", "play", "pass", "table_cleared", "timeout",
-                    "game_over", "user_reconnecting", "auto_play"):
-            self.append_log(data.get("_line", ""))
+                    "game_over", "user_reconnecting", "auto_play",
+                    "room_msg", "private_msg", "user_joined", "user_left", "error"):
+            self.append_line(data.get("_line", ""), kind)
+        if kind == "table_state":
+            self.refresh_chat_targets()

@@ -117,6 +117,13 @@ class ClientSession:
     async def whisper(self, to: str, text: str) -> None:
         assert self.conn is not None
         await self.conn.private_msg(to, text)
+        # 服务端给发送者的回执走的是"请求-响应"通道（不会被 _handle 处理），
+        # 所以这里补一行本地记录，保证自己也能在记录里看到发出去的私信。
+        self._emit(
+            "private_msg",
+            {"from": self.nickname, "to": to, "text": text, "self": True},
+            f"（私信）我 → {to}: {text}",
+        )
 
     async def ready(self) -> None:
         assert self.conn is not None
@@ -208,9 +215,13 @@ class ClientSession:
         elif kind == "user_reconnecting":
             line = f"[系统] {data.get('nickname')} 掉线，等待重连…"
         elif kind == "room_msg":
-            line = f"[{data.get('from')}] {data.get('text')}"
+            speaker = "我" if data.get("from") == self.nickname else data.get("from")
+            line = f"{speaker}: {data.get('text')}"
         elif kind == "private_msg":
-            line = f"（私信）[{data.get('from')} → {data.get('to')}] {data.get('text')}"
+            if data.get("self") or data.get("from") == self.nickname:
+                line = f"（私信）我 → {data.get('to')}: {data.get('text')}"
+            else:
+                line = f"（私信）{data.get('from')} → 我: {data.get('text')}"
         elif kind == "error":
             self.error = f"{data.get('code')}: {data.get('message')}"
             line = f"[错误] {self.error}"
