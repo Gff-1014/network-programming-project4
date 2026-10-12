@@ -145,12 +145,16 @@ class ClientSession:
         assert self.conn is not None
         await self.conn.request("auto_play", {"enabled": enabled})
         self.auto_play = enabled
-        self._note("已开启托管，轮到我时服务端会自动出牌" if enabled else "已取回控制")
-        self.on_event("auto_play", {"enabled": enabled})
+        self._emit(
+            "auto_play",
+            {"enabled": enabled},
+            "[托管] 已交给服务端自动出牌" if enabled else "[托管] 已取回控制",
+        )
 
     # ------------------------------------------------------------ 收消息 ----
 
     async def _handle(self, kind: str, data: dict) -> None:
+        line: str | None = None
         if kind == "room_list":
             self.rooms = data.get("rooms", [])
         elif kind == "room_users":
@@ -160,55 +164,70 @@ class ClientSession:
             self.role = data.get("role", self.role)
         elif kind in ("game_start", "hand"):
             self.hand = [parse_card(code) for code in data.get("hand", [])]
-            self._note(f"手牌 {len(self.hand)} 张: {cards_text(self.hand)}")
+            label = "发牌" if kind == "game_start" else "拿到底牌"
+            line = f"[{label}] 我的手牌（{len(self.hand)} 张）: {cards_text(self.hand)}"
         elif kind == "table_state":
             self.table = data
             if self.nickname:
                 self.auto_play = self.nickname in (data.get("auto_players") or [])
         elif kind == "landlord":
             self.table["landlord"] = data.get("landlord")
-            self._note(f"{data.get('landlord')} 成为地主，底牌 {data.get('bottom_text')}")
+            line = f"[定地主] {data.get('landlord')} 叫 {data.get('bid')} 分，底牌 {data.get('bottom_text')}"
         elif kind == "bid":
             score = data.get("score")
-            self._note(f"{data.get('player')} {'不叫' if not score else f'叫 {score} 分'}")
+            line = f"[叫分] {data.get('player')} {'不叫' if not score else f'叫 {score} 分'}"
         elif kind == "play":
             cards = [parse_card(code) for code in data.get("cards", [])]
             if data.get("player") == self.nickname:
                 for card in cards:
                     if card in self.hand:
                         self.hand.remove(card)
-            self._note(f"{data.get('player')} 出 {data.get('cards_text')}"
-                       f"（剩 {data.get('hand_count')} 张）")
+            bomb = "（炸弹）" if data.get("bomb") else ""
+            line = (f"[出牌] {data.get('player')}: {data.get('cards_text')}{bomb}"
+                    f"　剩 {data.get('hand_count')} 张")
         elif kind == "pass":
-            self._note(f"{data.get('player')} 过牌")
+            line = f"[过牌] {data.get('player')}"
         elif kind == "table_cleared":
             self.table["table"] = []
             self.table["table_owner"] = None
+            line = f"[一轮结束] {data.get('leader')} 重新领出"
         elif kind == "timeout":
-            self._note(f"{data.get('player')} 超时 → {data.get('action')}")
+            line = f"[托管] {data.get('player')} 超时未出 → {data.get('action')}"
         elif kind == "game_over":
             scores = data.get("scores") or {}
             mine = scores.get(self.nickname, 0)
-            self._note(f"本局结束：赢家 {data.get('winner')}，我 {mine:+d} 分")
+            line = f"[结算] 赢家 {data.get('winner')}，倍数 ×{data.get('multiplier')}，我 {mine:+d} 分"
             self.hand = []
         elif kind == "user_joined":
-            self._note(f"{data.get('nickname')} 进入了房间")
+            line = f"[系统] {data.get('nickname')} 进入房间"
         elif kind == "user_left":
-            self._note(f"{data.get('nickname')} 离开了房间")
+            line = f"[系统] {data.get('nickname')} 离开房间"
         elif kind == "user_reconnecting":
-            self._note(f"{data.get('nickname')} 掉线，等待重连…")
+            line = f"[系统] {data.get('nickname')} 掉线，等待重连…"
         elif kind == "room_msg":
-            self._note(f"[{data.get('from')}] {data.get('text')}")
+            line = f"[{data.get('from')}] {data.get('text')}"
         elif kind == "private_msg":
-            self._note(f"（私信）[{data.get('from')} → {data.get('to')}] {data.get('text')}")
+            line = f"（私信）[{data.get('from')} → {data.get('to')}] {data.get('text')}"
         elif kind == "error":
             self.error = f"{data.get('code')}: {data.get('message')}"
-            self._note(f"错误 {self.error}")
-        self.on_event(kind, data)
+            line = f"[错误] {self.error}"
+        self._emit(kind, data, line)
 
     def _note(self, text: str) -> None:
         self.log.append(text)
         self.log = self.log[-200:]
+
+    def _emit(self, kind: str, data: dict, line: str | None = None) -> None:
+        """把事件连同它自己的那行日志一起交给界面。
+
+        不能让界面用 `log[-1]` 去取最近一行：多个事件在同一批里到达时，
+        它们会取到同一行（既重复、又漏掉真正的记录）。
+        """
+        payload = dict(data)
+        if line:
+            self._note(line)
+            payload["_line"] = line
+        self.on_event(kind, payload)
 
     # ------------------------------------------------------------ 便捷 ----
 

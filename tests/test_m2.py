@@ -8,6 +8,7 @@ import pytest
 
 from bots.doudizhu_bot import DoudizhuBot
 from client.net import Connection, ServerError
+from client.session import ClientSession
 from server.protocol import ErrCode
 
 ROOM = "牌桌1"
@@ -252,6 +253,49 @@ async def test_online_auto_play_takes_over_my_turn(server_factory):
     assert first not in table.auto_players
     for conn in conns:
         await conn.close()
+
+
+async def test_human_turn_has_no_time_limit(server_factory):
+    """真人控制时不限时：放着不动也不会被服务端代打。"""
+    server = await server_factory(auto_play_delay_ms=200, sweep_interval_ms=100)
+    conns, _ = await make_seated(server, ["h0", "h1", "h2"])
+    await ready_all(conns)
+    for conn in conns:
+        await conn.wait_for("game_start", timeout=3.0)
+
+    state = await conns[0].wait_for("table_state", timeout=3.0, match={"state": "BIDDING"})
+    first = state["data"]["current"]
+    index = ["h0", "h1", "h2"].index(first)
+    await conns[index].request("bid", {"score": 3})
+    for conn in conns:
+        await conn.wait_for("landlord", timeout=3.0)
+
+    table = server.hub.rooms[ROOM].table
+    before = len(table.match.history)
+    await asyncio.sleep(1.0)   # 超过 auto_play_delay_ms，但地主由真人控制
+    assert len(table.match.history) == before, "真人控制时不该被自动代打"
+    assert table.public_state().get("deadline_in_ms") is None, "真人出牌不限时"
+    for conn in conns:
+        await conn.close()
+
+
+async def test_log_line_comes_with_its_own_event():
+    """每条事件自带它那一行日志，避免界面取“最近一行”造成重复与漏行。"""
+    session = ClientSession()
+    lines: list[str] = []
+    session.on_event = lambda kind, data: lines.append(data["_line"]) if data.get("_line") else None
+
+    await session._handle("bid", {"player": "a", "score": 1})
+    await session._handle("bid", {"player": "b", "score": 0})
+    await session._handle("play", {"player": "a", "cards_text": "3", "hand_count": 16})
+    await session._handle("pass", {"player": "b"})
+
+    assert lines == [
+        "[叫分] a 叫 1 分",
+        "[叫分] b 不叫",
+        "[出牌] a: 3　剩 16 张",
+        "[过牌] b",
+    ], "同一批事件必须各自带自己的那行日志"
 
 
 async def test_resume_into_table_restores_hand(server):

@@ -54,6 +54,7 @@ class MatchConfig:
 
     bid_timeout_ms: int = 10_000
     play_timeout_ms: int = 20_000
+    # 叫分/出牌超时设为 0 表示"不限时"（例如由真人自由出牌，交由网络层决定何时托管）
     max_redeal: int = 3          # 连续全不叫的次数上限，超过则本局作废
     base_score: int = 1
     request_cache_size: int = 256
@@ -119,6 +120,10 @@ class Match:
         event.setdefault("state", self.state.value)
         self.events.append(event)
 
+    def _arm_deadline(self, timeout_ms: int) -> None:
+        """设置本阶段截止时间；0 表示不限时。"""
+        self.deadline_ms = self.clock() + timeout_ms if timeout_ms > 0 else None
+
     def drain_events(self) -> list[dict]:
         events, self.events = self.events, []
         return events
@@ -160,7 +165,7 @@ class Match:
         self.bid_order = self.players[first:] + self.players[:first]
         self.current = self.bid_order[0]
         self.state = State.BIDDING
-        self.deadline_ms = self.clock() + self.cfg.bid_timeout_ms
+        self._arm_deadline(self.cfg.bid_timeout_ms)
         self._emit(type="bid_start", first=self.current, order=list(self.bid_order))
 
     def reset(self) -> None:
@@ -201,7 +206,7 @@ class Match:
             self._decide_landlord()
             return
         self.current = remaining[0]
-        self.deadline_ms = self.clock() + self.cfg.bid_timeout_ms
+        self._arm_deadline(self.cfg.bid_timeout_ms)
 
     def _decide_landlord(self) -> None:
         best = max(self.bids.values(), default=0)
@@ -225,7 +230,7 @@ class Match:
         self.state = State.PLAYING
         self.current = self.landlord
         self.table, self.table_owner, self.passes = [], None, 0
-        self.deadline_ms = self.clock() + self.cfg.play_timeout_ms
+        self._arm_deadline(self.cfg.play_timeout_ms)
         self._emit(
             type="landlord_decided",
             landlord=self.landlord,
@@ -318,12 +323,12 @@ class Match:
             self._emit(type="table_cleared", leader=self.current)
         else:
             self._advance(player)
-        self.deadline_ms = self.clock() + self.cfg.play_timeout_ms
+        self._arm_deadline(self.cfg.play_timeout_ms)
 
     def _advance(self, player: str) -> None:
         idx = self.players.index(player)
         self.current = self.players[(idx + 1) % len(self.players)]
-        self.deadline_ms = self.clock() + self.cfg.play_timeout_ms
+        self._arm_deadline(self.cfg.play_timeout_ms)
 
     def _last_player(self, fallback: str) -> str:
         """最近一次真正出牌的玩家（用于两度过牌后重新领出）。"""

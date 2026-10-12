@@ -56,7 +56,7 @@ class Settings:
     seats_per_table: int = _env_int("DDZ_SEATS_PER_TABLE", 3)
     max_spectators: int = _env_int("DDZ_MAX_SPECTATORS", 2)
     # 断线托管：轮到自己后多久自动出牌（毫秒）
-    auto_play_delay_ms: int = _env_int("DDZ_AUTO_PLAY_DELAY_MS", 1000)
+    auto_play_delay_ms: int = _env_int("DDZ_AUTO_PLAY_DELAY_MS", 3000)
 
 
 settings = Settings()

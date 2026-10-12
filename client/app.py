@@ -173,9 +173,11 @@ class ChatApp(tk.Tk):
         else:
             self.countdown_ms = max(0, self.countdown_ms - 200)
         seconds = "-" if self.countdown_ms is None else f"{self.countdown_ms // 1000}s"
-        self.current_var.set(
-            f"轮到 {self.session.table.get('current') or '-'}　剩余 {seconds}"
-        )
+        current = self.session.table.get("current") or "-"
+        if self.countdown_ms is None:
+            self.current_var.set(f"轮到 {current}　不限时")
+        else:
+            self.current_var.set(f"轮到 {current}　{seconds}后自动出牌")
         self.after(200, self._tick_countdown)
 
     # ------------------------------------------------------------ 动作封装 ----
@@ -389,9 +391,7 @@ class RoomFrame(BaseFrame):
     def on_event(self, kind: str, data: dict) -> None:
         if kind == "room_users" and data.get("room") == self.app.session.room:
             self.refresh_users()
-        if kind in ("room_msg", "private_msg", "user_joined", "user_left",
-                    "user_reconnecting", "error", "game_over", "timeout"):
-            self.append_log(self.app.session.log[-1] if self.app.session.log else "")
+        self.append_log(data.get("_line", ""))
 
     def append_log(self, text: str) -> None:
         if not text:
@@ -416,13 +416,14 @@ class TableFrame(BaseFrame):
         # 对手信息
         seats = ttk.Frame(self)
         seats.pack(fill="x", pady=6)
-        self.seat_vars: dict[str, tk.StringVar] = {}
-        for index in range(2):
-            var = tk.StringVar(value="等待玩家…")
-            ttk.Label(seats, textvariable=var, font=FONT_UI, relief="groove", padding=6).pack(
+        self.seat_vars: list[tk.StringVar] = []
+        for index in range(3):
+            var = tk.StringVar(value=f"座位 {index + 1}：等待玩家…")
+            ttk.Label(seats, textvariable=var, font=FONT_UI, relief="groove", padding=6,
+                      anchor="center", justify="center").pack(
                 side="left", fill="x", expand=True, padx=4
             )
-            self.seat_vars[f"seat{index}"] = var
+            self.seat_vars.append(var)
 
         middle = ttk.Frame(self)
         middle.pack(fill="both", expand=True)
@@ -485,12 +486,30 @@ class TableFrame(BaseFrame):
         )
         self.app.multiplier_var.set(f"倍数 ×{state.get('multiplier', 1)}")
 
-        others = [name for name in state.get("players", []) if name != session.nickname]
-        for index, name in enumerate(others[:2]):
-            count = (state.get("hand_counts") or {}).get(name, 0)
-            online = "" if state.get("seats", [{}]) else ""
-            marker = "（地主）" if name == state.get("landlord") else ""
-            self.seat_vars[f"seat{index}"].set(f"{name}{marker}{online}　剩 {count} 张")
+        # 三个座位都显示（含自己），并标出地主、我、托管中、离线、当前轮到谁
+        players = list(state.get("players") or [])
+        counts = state.get("hand_counts") or {}
+        online_map = {seat["nickname"]: seat.get("online", True)
+                      for seat in (state.get("seats") or [])}
+        autos = set(state.get("auto_players") or [])
+        for index, var in enumerate(self.seat_vars):
+            if index >= len(players):
+                var.set(f"座位 {index + 1}：空座")
+                continue
+            name = players[index]
+            marks = []
+            if name == state.get("landlord"):
+                marks.append("地主")
+            if name == session.nickname:
+                marks.append("我")
+            if name in autos:
+                marks.append("托管中")
+            if not online_map.get(name, True):
+                marks.append("离线")
+            if name == state.get("current"):
+                marks.append("当前")
+            suffix = f"（{'、'.join(marks)}）" if marks else ""
+            var.set(f"{name}{suffix}\n剩 {counts.get(name, 0)} 张")
 
         state_name = state.get("state", "WAITING")
         my_turn = session.my_turn
@@ -534,5 +553,5 @@ class TableFrame(BaseFrame):
                     f"赢家：{data.get('winner')}\n我的得分：{mine:+d}" if mine is not None else f"赢家：{data.get('winner')}",
                 )
         if kind in ("landlord", "bid", "play", "pass", "table_cleared", "timeout",
-                    "game_over", "user_reconnecting"):
-            self.append_log(self.app.session.log[-1] if self.app.session.log else "")
+                    "game_over", "user_reconnecting", "auto_play"):
+            self.append_log(data.get("_line", ""))

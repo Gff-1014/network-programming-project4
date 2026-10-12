@@ -117,7 +117,12 @@ class Table:
     def _ensure_match(self) -> None:
         """座位坐满时才创建对局；开局由 ready() 在三人全部准备后触发。"""
         if self.match is None and len(self.seats) == self.cfg.seats_per_table:
-            self.match = Match(list(self.seats), seed=None, config=MatchConfig())
+            # 引擎层不设超时：真人出牌不限时，AI/托管由本类的 tick() 按 auto_play_delay_ms 驱动
+            self.match = Match(
+                list(self.seats),
+                seed=None,
+                config=MatchConfig(bid_timeout_ms=0, play_timeout_ms=0),
+            )
             self._last_turn = None
 
     def ready(self, session: "Session") -> Action:
@@ -217,13 +222,9 @@ class Table:
         if self.match.state in (State.BIDDING, State.PLAYING):
             seated = self.seats.get(current) if current else None
             auto = seated is None or current in self.auto_players
-            if auto:  # 断线或在线托管：轮到自己 1 秒后自动决策
-                if now - self._turn_started_ms >= self.cfg.auto_play_delay_ms:
-                    self.match.timeout()
-                    self._flush_events()
-                    self.broadcast(make("table_state", self.public_state()), droppable=True)
-                    return
-            elif self.match.tick(now):
+            # 只有"托管/掉线"才由服务端代打；真人自由出牌，不设时限
+            if auto and now - self._turn_started_ms >= self.cfg.auto_play_delay_ms:
+                self.match.timeout()
                 self._flush_events()
                 self.broadcast(make("table_state", self.public_state()), droppable=True)
 
@@ -260,9 +261,16 @@ class Table:
         view["table_text"] = cards_text(self.match.table)
         view["bottom"] = [card_code(c) for c in view.get("bottom", [])]
         view["bottom_text"] = cards_text(self.match.bottom) if view.get("bottom_revealed") else ""
-        # 客户端不共享服务端时钟，额外给出"还剩多少毫秒"
-        deadline = view.get("deadline_ms")
-        view["deadline_in_ms"] = max(0, deadline - now_ms()) if deadline else None
+        # 客户端不共享服务端时钟：托管席位给出"还有多久自动出牌"，真人席位不限时
+        current = view.get("current")
+        auto = current in self.auto_players or (
+            current is not None and self.seats.get(current) is None
+        )
+        if auto and self.match.state in (State.BIDDING, State.PLAYING):
+            elapsed = now_ms() - self._turn_started_ms
+            view["deadline_in_ms"] = max(0, self.cfg.auto_play_delay_ms - elapsed)
+        else:
+            view["deadline_in_ms"] = None
         view["room"] = self.room.name
         view["seats"] = [{"nickname": n, "online": self.seats.get(n) is not None}
                          for n in self.seats]
