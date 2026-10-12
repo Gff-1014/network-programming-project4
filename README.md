@@ -27,6 +27,10 @@ Python 3.12。`requirements.txt` 只有 pytest（测试用），运行时无第�
 # 3b) 走网络的三人对局（服务端需已启动；--spectators 可加观战）
 .venv\Scripts\python.exe bots\run_table.py --room 牌桌1 --spectators 1
 
+# 3c) 窗口客户端（可开多个；--auto-login/--room/--auto-ready 为演示参数）
+.venv\Scripts\python.exe -m client
+.venv\Scripts\python.exe -m client --nickname demoA --auto-login --room 牌桌1 --auto-ready
+
 # 4) 运行全部测试
 .venv\Scripts\python.exe -m pytest -q
 ```
@@ -40,7 +44,7 @@ Python 3.12。`requirements.txt` 只有 pytest（测试用），运行时无第�
 config.py        服务端配置（端口、分帧上限、握手与队列参数）
 server/          分帧、会话、房间、消息处理与服务端入口
 game/            牌型规则（移植 onestraw/doudizhu，MIT）、对局状态机、托管 AI
-client/          客户端网络层（单读者多路复用），Tkinter 界面在 M2 接入
+client/          客户端：网络层（单读者多路复用）、会话层、Tkinter 界面
 bots/            机器人压测脚本
 scripts/         冒烟与演示脚本
 tests/           自动化测试

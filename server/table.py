@@ -239,6 +239,9 @@ class Table:
         view["table_text"] = cards_text(self.match.table)
         view["bottom"] = [card_code(c) for c in view.get("bottom", [])]
         view["bottom_text"] = cards_text(self.match.bottom) if view.get("bottom_revealed") else ""
+        # 客户端不共享服务端时钟，额外给出"还剩多少毫秒"
+        deadline = view.get("deadline_ms")
+        view["deadline_in_ms"] = max(0, deadline - now_ms()) if deadline else None
         view["room"] = self.room.name
         view["seats"] = [{"nickname": n, "online": self.seats.get(n) is not None}
                          for n in self.seats]
