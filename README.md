@@ -21,14 +21,17 @@ Python 3.12。`requirements.txt` 只有 pytest（测试用），运行时无第�
 # 2) 机器人压测（另开一个终端）
 .venv\Scripts\python.exe bots\run_bots.py --clients 10 --rounds 5
 
-# 3) 对局冒烟：三个机器人自动打完一局斗地主
+# 3) 对局冒烟（本地逻辑，不走网络）：三个机器人自动打完一局
 .venv\Scripts\python.exe scripts\smoke_match.py --seed 20261011
+
+# 3b) 走网络的三人对局（服务端需已启动；--spectators 可加观战）
+.venv\Scripts\python.exe bots\run_table.py --room 牌桌1 --spectators 1
 
 # 4) 运行全部测试
 .venv\Scripts\python.exe -m pytest -q
 ```
 
-房间：`大厅`（登录后自动进入，不可退出）、`聊天房`。
+房间：`大厅`（登录后自动进入，不可退出）、`聊天房`、`牌桌1/2/3`（三人一桌，每桌可 2 人观战）。
 端口与上限可以在环境变量里覆盖，例如 `DDZ_PORT=9022`、`DDZ_MAX_FRAME_BYTES=131072`。
 
 ## 三、目录
@@ -51,7 +54,7 @@ evidence/        验证记录
 | --- | --- | --- |
 | M0 | 分帧 + 多客户端 + 在线列表 + 房间广播 | 完成（10 客户端 100% 到达） |
 | M1 | 队列背压策略 + 心跳判活 + 断线清理 + token 重连 | 完成（慢客户端对照实验通过） |
-| M2 | 斗地主引擎接入网络 + Tkinter 客户端 | 引擎与状态机已完成，待接入 |
+| M2 | 斗地主引擎接入网络 + Tkinter 客户端 | 引擎已接入网络（牌桌/观战/托管/重连均已验证）；Tkinter 客户端待做 |
 | M3 | 观战 + 故障注入 + 对照实验 + 文档归档 | 待开始 |
 
 ## 六、可调参数（环境变量）
@@ -70,6 +73,9 @@ evidence/        验证记录
 | `DDZ_RECONNECT_GRACE_MS` | 60000 | 重连宽限期 |
 | `DDZ_HANDSHAKE_TIMEOUT_MS` | 10000 | 握手超时 |
 | `DDZ_MAX_TEXT_CHARS` | 500 | 单条文本上限 |
+| `DDZ_SEATS_PER_TABLE` | 3 | 每桌座位数 |
+| `DDZ_MAX_SPECTATORS` | 2 | 每桌观战人数上限 |
+| `DDZ_AUTO_PLAY_DELAY_MS` | 1000 | 掉线托管后多久自动决策 |
 
 慢客户端对照实验（另开终端）：
 

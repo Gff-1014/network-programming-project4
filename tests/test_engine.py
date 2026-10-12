@@ -244,6 +244,18 @@ def test_request_id_is_idempotent():
     assert (match.state, match.landlord, dict(match.bids)) == state_snapshot
 
 
+def test_request_id_is_scoped_per_player():
+    """两个玩家用同一个 request_id 时，不能互相把对方的动作吞掉。"""
+    match = new_match()
+    first = match.current
+    assert match.bid(first, 0, request_id="c4").ok
+    second = match.current
+    assert second != first
+    action = match.bid(second, 2, request_id="c4")  # 同一个编号，但换了玩家
+    assert action.ok and not action.duplicate
+    assert match.bids[second] == 2, "第二个玩家的叫分必须真正生效"
+
+
 # --------------------------------------------------------------- 视图 ----
 
 

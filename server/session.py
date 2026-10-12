@@ -119,7 +119,12 @@ class Session:
         data = payload.get("data") or {}
         if not isinstance(data, dict):
             data = {}
-        await handler(self, data, request_id)
+        try:
+            await handler(self, data, request_id)
+        except Exception:
+            # 单个处理器的 bug 不该拖垮整条连接
+            logger.exception("[%s] 处理 %s 时异常", self.conn_id, msg_type)
+            self.send(error(ErrCode.INTERNAL, f"处理 {msg_type} 时内部错误", request_id))
 
     def _reject_bad_frame(self, exc: FrameError) -> bool:
         """记录非法帧并回错误；返回是否还能继续读（字节流是否仍然对齐）。"""

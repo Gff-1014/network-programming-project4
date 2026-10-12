@@ -22,3 +22,15 @@ def cards_text(cards) -> str:
 def is_red(card_int: int) -> bool:
     """是否红花色（客户端渲染用）。"""
     return Card.get_suit_int(card_int) in RED_SUITS
+
+
+def card_code(card_int: int) -> str:
+    """协议里的牌面编码，如 '3s'、'BJ'、'CJ'（可被 Card.new 还原）。"""
+    if Card.get_rank_int(card_int) >= 13:  # 大小王没有花色，int_to_str 会带空格
+        return Card.rank_int_to_str(card_int)
+    return Card.int_to_str(card_int)
+
+
+def parse_card(code: str) -> int:
+    """协议牌面编码 → 整数牌。"""
+    return Card.new(code)

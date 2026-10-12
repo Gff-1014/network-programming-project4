@@ -25,6 +25,12 @@ C2S_TYPES = (
     "list_rooms",
     "join_room",
     "leave_room",
+    "room_ready",
+    "bid",
+    "play",
+    "pass",
+    "spectate",
+    "game_state",
     "room_msg",
     "private_msg",
 )
@@ -46,6 +52,14 @@ S2C_TYPES = (
     "user_reconnecting",
     "room_msg",
     "private_msg",
+    "game_start",
+    "game_state",
+    "bid",
+    "play",
+    "pass",
+    "game_over",
+    "table_state",
+    "spectating",
 )
 
 SUPPORTED_TYPES = tuple(dict.fromkeys(C2S_TYPES))  # 未知类型提示里列出的可发送类型
@@ -70,6 +84,11 @@ class ErrCode(str):
     SLOW_CONSUMER = "SLOW_CONSUMER"
     SESSION_EXPIRED = "SESSION_EXPIRED"
     ALREADY_LOGGED_IN = "ALREADY_LOGGED_IN"
+    ROOM_FULL = "ROOM_FULL"
+    NOT_SEATED = "NOT_SEATED"
+    MATCH_NOT_STARTED = "MATCH_NOT_STARTED"
+    INVALID_BID = "INVALID_BID"
+    INTERNAL = "INTERNAL"
 
 
 # ------------------------------------------------------------------ 构造函数 ----

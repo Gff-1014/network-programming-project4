@@ -20,6 +20,17 @@ def _text(data: dict, key: str = "text") -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _action_error(session, action, request_id: str | None) -> None:
+    """把引擎返回的 Action 翻译成 error 帧。"""
+    code = getattr(action.code, "value", action.code) or ErrCode.BAD_MESSAGE
+    session.send(error(code, action.detail or "操作被拒绝", request_id))
+
+
+def _table_of(session):
+    room = session.hub.room_of(session)
+    return room.table if room is not None else None
+
+
 @register("login")
 async def on_login(session, data: dict, request_id: str | None) -> None:
     if session.nickname is not None:
@@ -98,13 +109,28 @@ async def on_join_room(session, data: dict, request_id: str | None) -> None:
     if not isinstance(room_name, str):
         session.send(error(ErrCode.ROOM_NOT_FOUND, "缺少 room", request_id))
         return
+    target = session.hub.rooms.get(room_name)
+    table = target.table if target is not None else None
+    if table is not None:
+        ok, code, message = table.can_join(session)
+        if not ok:
+            session.send(error(code or ErrCode.ROOM_FULL, message or "牌桌已满", request_id))
+            return
     ok, code, message = session.hub.join(session, room_name)
     if not ok:
         session.send(error(code or ErrCode.ROOM_NOT_FOUND, message or "加入失败", request_id))
         return
     room = session.hub.room_of(session)
-    session.send(make("joined", {"room": room_name, "users": room.nicknames() if room else []},
-                      request_id))
+    role = "player"
+    if table is not None:
+        ok, code, message = table.join(session)
+        if not ok:
+            session.send(error(code or ErrCode.ROOM_FULL, message or "牌桌已满", request_id))
+            return
+        role = "player" if session.nickname in table.seats else "spectator"
+        session.send(make("table_state", table.public_state()))
+    session.send(make("joined", {"room": room_name, "users": room.nicknames() if room else [],
+                                 "role": role}, request_id))
 
 
 @register("leave_room")
@@ -112,6 +138,9 @@ async def on_leave_room(session, data: dict, request_id: str | None) -> None:
     if not _require_login(session):
         return
     previous = session.room
+    table = _table_of(session)
+    if table is not None:
+        table.leave(session)
     ok, code, message = session.hub.leave(session)
     if not ok:
         session.send(error(code or ErrCode.NOT_IN_ROOM, message or "退出失败", request_id))
@@ -180,3 +209,96 @@ async def on_private_msg(session, data: dict, request_id: str | None) -> None:
     receiver.send(payload)
     session.send(make("private_msg", {"from": session.nickname, "to": target, "text": text,
                                      "self": True}, request_id))
+
+
+# ------------------------------------------------------------ 牌桌消息 ----
+
+
+@register("room_ready")
+async def on_room_ready(session, data: dict, request_id: str | None) -> None:
+    table = _table_of(session)
+    if table is None:
+        session.send(error(ErrCode.BAD_STATE, "当前房间不是牌桌", request_id))
+        return
+    action = table.ready(session)
+    if not action.ok:
+        _action_error(session, action, request_id)
+        return
+    session.send(make("ok", {"action": "ready"}, request_id))
+
+
+@register("bid")
+async def on_bid(session, data: dict, request_id: str | None) -> None:
+    table = _table_of(session)
+    if table is None:
+        session.send(error(ErrCode.BAD_STATE, "当前房间不是牌桌", request_id))
+        return
+    score = data.get("score")
+    if not isinstance(score, int) or score not in (0, 1, 2, 3):
+        session.send(error(ErrCode.INVALID_BID, "叫分必须是 0/1/2/3", request_id))
+        return
+    action = table.bid(session, score, request_id)
+    if not action.ok:
+        _action_error(session, action, request_id)
+        return
+    session.send(make("ok", {"action": "bid", "score": score}, request_id))
+
+
+@register("play")
+async def on_play(session, data: dict, request_id: str | None) -> None:
+    table = _table_of(session)
+    if table is None:
+        session.send(error(ErrCode.BAD_STATE, "当前房间不是牌桌", request_id))
+        return
+    cards = data.get("cards")
+    if not isinstance(cards, list) or not cards or not all(isinstance(c, str) for c in cards):
+        session.send(error(ErrCode.BAD_MESSAGE, "cards 必须是非空字符串数组", request_id))
+        return
+    action = table.play(session, cards, request_id)
+    if not action.ok:
+        _action_error(session, action, request_id)
+        return
+    session.send(make("ok", {"action": "play", "cards": cards}, request_id))
+
+
+@register("pass")
+async def on_pass(session, data: dict, request_id: str | None) -> None:
+    table = _table_of(session)
+    if table is None:
+        session.send(error(ErrCode.BAD_STATE, "当前房间不是牌桌", request_id))
+        return
+    action = table.pass_turn(session, request_id)
+    if not action.ok:
+        _action_error(session, action, request_id)
+        return
+    session.send(make("ok", {"action": "pass"}, request_id))
+
+
+@register("game_state")
+async def on_game_state(session, data: dict, request_id: str | None) -> None:
+    """请求牌桌快照：玩家拿自己的手牌，观战者只拿公开信息。"""
+    table = _table_of(session)
+    if table is None or table.match is None:
+        session.send(error(ErrCode.MATCH_NOT_STARTED, "牌桌还没有开始对局", request_id))
+        return
+    if session.nickname in table.seats:
+        session.send(make("game_state", table.view_for(session.nickname), request_id))
+    else:
+        session.send(make("table_state", table.public_state(), request_id))
+
+
+@register("spectate")
+async def on_spectate(session, data: dict, request_id: str | None) -> None:
+    """观战：加入牌桌但不占座位（座位未满时会提示直接入座）。"""
+    room_name = data.get("room")
+    if not isinstance(room_name, str) or room_name not in session.hub.rooms:
+        session.send(error(ErrCode.ROOM_NOT_FOUND, "房间不存在", request_id))
+        return
+    room = session.hub.rooms[room_name]
+    if room.table is None:
+        session.send(error(ErrCode.BAD_STATE, "该房间不是牌桌", request_id))
+        return
+    if len(room.table.seats) < room.table.cfg.seats_per_table:
+        session.send(error(ErrCode.BAD_STATE, "牌桌还有空位，请直接加入房间入座", request_id))
+        return
+    await on_join_room(session, {"room": room_name}, request_id)

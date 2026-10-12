@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .protocol import ErrCode, error, make, now_ms
+from .table import Table
 
 if TYPE_CHECKING:  # pragma: no cover
     from .session import Session
@@ -37,6 +38,7 @@ class Room:
         self.name = name
         self.kind = kind
         self.members: dict[str, "Session"] = {}
+        self.table: Table | None = None
 
     def add(self, session: "Session") -> None:
         self.members[session.conn_id] = session
@@ -75,6 +77,10 @@ class Hub:
         self.rooms[cfg.lobby_room] = Room(cfg.lobby_room, kind="lobby")
         for name in cfg.chat_rooms:
             self.rooms[name] = Room(name, kind="chat")
+        for name in cfg.table_rooms:
+            room = Room(name, kind="doudizhu")
+            room.table = Table(room, cfg)
+            self.rooms[name] = room
         self.dropped_total = 0
         self.slow_consumer_disconnects = 0
         self.idle_timeouts = 0
@@ -130,7 +136,9 @@ class Hub:
         session.token = self._new_token()
         self.by_nickname[reservation.nickname] = session
         room_name = reservation.room if reservation.room in self.rooms else self.cfg.lobby_room
-        self._enter_room(session, room_name, resumed=True)
+        room = self._enter_room(session, room_name, resumed=True)
+        if room.table is not None:
+            room.table.on_resume(session)
         return True, None, None
 
     def _enter_room(self, session: "Session", room_name: str, resumed: bool = False) -> Room:
@@ -158,6 +166,8 @@ class Hub:
 
         if nickname and room is not None:
             room.remove(session)
+            if room.table is not None:
+                room.table.on_disconnect(session)
         if nickname and self.by_nickname.get(nickname) is session:
             del self.by_nickname[nickname]
 

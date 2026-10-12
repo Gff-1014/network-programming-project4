@@ -1,0 +1,222 @@
+"""M2：牌桌协议、状态裁决、观战、断线托管与重连恢复。"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from bots.doudizhu_bot import DoudizhuBot
+from client.net import Connection, ServerError
+from server.protocol import ErrCode
+
+ROOM = "牌桌1"
+
+
+async def make_seated(server, names, room=ROOM):
+    """登录并坐上牌桌，返回 (连接, 机器人) 列表与角色信息。"""
+    conns, roles = [], []
+    for name in names:
+        conn = await Connection.connect(server.host, server.port)
+        await conn.login(name)
+        reply = await conn.join_room(room)
+        conns.append(conn)
+        roles.append(reply["data"].get("role"))
+    return conns, roles
+
+
+async def ready_all(conns):
+    for conn in conns:
+        await conn.request("room_ready", {})
+
+
+async def test_seats_and_spectators(server):
+    conns, roles = await make_seated(server, ["p0", "p1", "p2", "p3", "p4"])
+    assert roles == ["player", "player", "player", "spectator", "spectator"]
+
+    extra = await Connection.connect(server.host, server.port)
+    await extra.login("p5")
+    with pytest.raises(ServerError) as exc:
+        await extra.join_room(ROOM)
+    assert exc.value.code == ErrCode.ROOM_FULL
+    for conn in conns + [extra]:
+        await conn.close()
+
+
+async def test_ready_deals_private_hands(server):
+    conns, _ = await make_seated(server, ["d0", "d1", "d2"])
+    await ready_all(conns)
+
+    hands = []
+    for conn in conns:
+        frame = await conn.wait_for("game_start", timeout=3.0)
+        assert len(frame["data"]["hand"]) == 17
+        hands.append(set(frame["data"]["hand"]))
+
+    # 三家手牌互不重叠，合计 51 张
+    assert len(hands[0] | hands[1] | hands[2]) == 51
+    # 公开视图不含任何手牌
+    public = await conns[0].wait_for("table_state", timeout=3.0)
+    assert "hand" not in public["data"]
+    for conn in conns:
+        await conn.close()
+
+
+async def test_bid_three_makes_landlord_and_reveals_bottom(server):
+    conns, _ = await make_seated(server, ["e0", "e1", "e2"])
+    await ready_all(conns)
+    for conn in conns:
+        await conn.wait_for("game_start", timeout=3.0)
+
+    state = await conns[0].wait_for("table_state", timeout=3.0, match={"state": "BIDDING"})
+    first = state["data"]["current"]
+    bidder = conns[["e0", "e1", "e2"].index(first)]
+    await bidder.request("bid", {"score": 3})
+
+    for conn in conns:
+        landlord_event = await conn.wait_for("landlord", timeout=3.0)
+        assert landlord_event["data"]["landlord"] == first
+        assert len(landlord_event["data"]["bottom"]) == 3
+
+    hand = await bidder.wait_for("hand", timeout=3.0)
+    assert len(hand["data"]["hand"]) == 20, "地主应拿到三张底牌"
+    for conn in conns:
+        await conn.close()
+
+
+async def test_play_rules_are_enforced(server):
+    conns, _ = await make_seated(server, ["f0", "f1", "f2"])
+    await ready_all(conns)
+    for conn in conns:
+        await conn.wait_for("game_start", timeout=3.0)
+
+    state = await conns[0].wait_for("table_state", timeout=3.0, match={"state": "BIDDING"})
+    first = state["data"]["current"]
+    index = ["f0", "f1", "f2"].index(first)
+    landlord_conn, landlord_bot = conns[index], None
+    await landlord_conn.request("bid", {"score": 3})
+    hand = await landlord_conn.wait_for("hand", timeout=3.0)
+    cards = hand["data"]["hand"]
+
+    # 不是自己回合
+    other = conns[(index + 1) % 3]
+    with pytest.raises(ServerError) as exc:
+        await other.request("play", {"cards": [cards[0]]})
+    assert exc.value.code == "NOT_YOUR_TURN"
+
+    # 先手不能过牌
+    with pytest.raises(ServerError) as exc:
+        await landlord_conn.request("pass", {})
+    assert exc.value.code == "CANNOT_PASS"
+
+    # 手里没有的牌
+    foreign = next(code for code in ("3s", "4h", "5d", "6c", "7s", "8h", "9d")
+                   if code not in cards)
+    with pytest.raises(ServerError) as exc:
+        await landlord_conn.request("play", {"cards": [foreign]})
+    assert exc.value.code == "NOT_IN_HAND"
+
+    # 合法出牌
+    ok = await landlord_conn.request("play", {"cards": [cards[-1]]})
+    assert ok["data"]["action"] == "play"
+    for conn in conns:
+        await conn.close()
+
+
+async def test_spectator_sees_only_public_state(server):
+    conns, _ = await make_seated(server, ["g0", "g1", "g2"])
+    await ready_all(conns)
+    spectator = await Connection.connect(server.host, server.port)
+    await spectator.login("watcher")
+    reply = await spectator.join_room(ROOM)
+    assert reply["data"]["role"] == "spectator"
+
+    state = await spectator.wait_for("table_state", timeout=3.0)
+    assert "hand" not in state["data"]
+    assert "hand_counts" in state["data"]
+    for conn in conns + [spectator]:
+        await conn.close()
+
+
+async def test_three_bots_finish_a_game(server):
+    """端到端验收：三个机器人通过协议打完整局，手牌不泄露，分数为 0 和。"""
+    conns = [await Connection.connect(server.host, server.port) for _ in range(3)]
+    bots = []
+    for index, conn in enumerate(conns):
+        await conn.login(f"bot{index}")
+        bots.append(DoudizhuBot(f"bot{index}", conn, ROOM))
+    for bot in bots:
+        await bot.join_and_ready()
+
+    results = await asyncio.wait_for(
+        asyncio.gather(*(bot.play_until_end(30) for bot in bots)), 40
+    )
+    result = results[0]
+    assert result["winner"] in [b.nickname for b in bots]
+    assert sum(result["scores"].values()) == 0
+    assert all(not bot.errors for bot in bots)
+    # 每个机器人结束时都不知道别人的手牌（只知道张数）
+    for bot in bots:
+        assert len(bot.hand) <= 20
+        assert set(bot.hand_counts) == {b.nickname for b in bots}
+
+
+async def test_disconnected_player_is_auto_played(server_factory):
+    server = await server_factory(auto_play_delay_ms=150, sweep_interval_ms=100)
+    conns, _ = await make_seated(server, ["h0", "h1", "h2"])
+    await ready_all(conns)
+    for conn in conns:
+        await conn.wait_for("game_start", timeout=3.0)
+
+    state = await conns[0].wait_for("table_state", timeout=3.0, match={"state": "BIDDING"})
+    first = state["data"]["current"]
+    index = ["h0", "h1", "h2"].index(first)
+    await conns[index].request("bid", {"score": 3})
+    for conn in conns:
+        await conn.wait_for("landlord", timeout=3.0)
+
+    table = server.hub.rooms[ROOM].table
+    before = len(table.match.history)
+    await conns[index].close()  # 地主掉线
+
+    # 服务端应在托管延迟后替他自动出牌，牌局继续
+    for _ in range(40):
+        if len(table.match.history) > before:
+            break
+        await asyncio.sleep(0.1)
+    assert len(table.match.history) > before, "掉线玩家应由服务端托管自动出牌"
+    assert table.seats[first] is None, "掉线期间保留座位并标记离线"
+    for conn in conns:
+        await conn.close()
+
+
+async def test_resume_into_table_restores_hand(server):
+    """断线后用 token 回到牌桌：昵称、房间、手牌都要恢复。"""
+    conns, tokens = [], []
+    for name in ("k0", "k1", "k2"):
+        conn = await Connection.connect(server.host, server.port)
+        welcome = await conn.login(name)
+        tokens.append(welcome["data"]["token"])
+        await conn.join_room(ROOM)
+        conns.append(conn)
+    await ready_all(conns)
+    for conn in conns:
+        await conn.wait_for("game_start", timeout=3.0)
+
+    await conns[0].close()  # 掉线，进入重连保留期
+    for _ in range(40):
+        if server.hub.reserved_count() == 1:
+            break
+        await asyncio.sleep(0.1)
+    assert server.hub.reserved_count() == 1
+
+    again = await Connection.connect(server.host, server.port)
+    resumed = await again.resume(tokens[0])
+    assert resumed["data"]["nickname"] == "k0"
+    assert resumed["data"]["room"] == ROOM, "重连应回到原牌桌"
+    assert resumed["data"]["token"] != tokens[0], "重连应换发新 token"
+
+    snapshot = await again.wait_for("game_state", timeout=3.0)
+    assert len(snapshot["data"]["hand"]) == 17, "重连后应拿回自己的手牌"
+    for conn in conns[1:] + [again]:
+        await conn.close()

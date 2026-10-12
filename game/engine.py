@@ -103,7 +103,7 @@ class Match:
         self.deadline_ms: int | None = None
         self.events: list[dict] = []
         self.deal_round = 0
-        self._requests: OrderedDict[str, Action] = OrderedDict()
+        self._requests: OrderedDict[tuple[str, str], Action] = OrderedDict()
 
     # ------------------------------------------------------------ 查询 ----
 
@@ -171,7 +171,7 @@ class Match:
 
     def bid(self, player: str, score: int, request_id: str | None = None) -> Action:
         """叫分：0 表示不叫，1/2/3 必须高于当前最高分。"""
-        cached = self._cached(request_id)
+        cached = self._cached(player, request_id)
         if cached is not None:
             return cached
         if self.state is not State.BIDDING:
@@ -186,7 +186,7 @@ class Match:
 
         self.bids[player] = score
         self._emit(type="bid", player=player, score=score)
-        self._remember(request_id, Action(True))
+        self._remember(player, request_id, Action(True))
 
         if score == 3 or len(self.bids) == len(self.players):
             self._decide_landlord()
@@ -237,7 +237,7 @@ class Match:
     # ------------------------------------------------------------ 出牌 ----
 
     def play(self, player: str, cards: list[int], request_id: str | None = None) -> Action:
-        cached = self._cached(request_id)
+        cached = self._cached(player, request_id)
         if cached is not None:
             return cached
         if self.state is not State.PLAYING:
@@ -258,12 +258,12 @@ class Match:
                 return Action(False, Err.INVALID_PLAY, f"压不过 {hand_str(self.table)}")
 
         self._apply_play(player, cards)
-        self._remember(request_id, Action(True))
+        self._remember(player, request_id, Action(True))
         return Action(True)
 
     def pass_turn(self, player: str, request_id: str | None = None) -> Action:
         """过牌；只有在别人出过牌（桌面非空）时才能过。"""
-        cached = self._cached(request_id)
+        cached = self._cached(player, request_id)
         if cached is not None:
             return cached
         if self.state is not State.PLAYING:
@@ -274,7 +274,7 @@ class Match:
             return Action(False, Err.CANNOT_PASS, "你是本轮先手，必须出牌")
 
         self._apply_pass(player)
-        self._remember(request_id, Action(True))
+        self._remember(player, request_id, Action(True))
         return Action(True)
 
     def _apply_play(self, player: str, cards: list[int]) -> None:
@@ -394,6 +394,7 @@ class Match:
         self._emit(
             type="game_over",
             winner=winner,
+            landlord=self.landlord,
             landlord_win=landlord_win,
             spring=spring,
             bombs=self.bombs,
@@ -429,23 +430,31 @@ class Match:
             "deadline_ms": self.deadline_ms,
             "result": self.result,
             "deal_round": self.deal_round,
+            "history_len": len(self.history),
         }
 
     # ------------------------------------------------------------ 幂等 ----
 
-    def _cached(self, request_id: str | None) -> Action | None:
+    def _cached(self, player: str, request_id: str | None) -> Action | None:
+        """幂等作用域是"每个玩家各自的 request_id"。
+
+        不能用全局 request_id 去重：不同客户端的编号会重号，
+        别人用过的编号会把自己的动作当成重复请求吞掉（实测踩到过这个坑）。
+        """
         if not request_id:
             return None
-        hit = self._requests.get(request_id)
+        key = (player, request_id)
+        hit = self._requests.get(key)
         if hit is None:
             return None
-        self._requests.move_to_end(request_id)
+        self._requests.move_to_end(key)
         return Action(ok=hit.ok, code=hit.code, detail=hit.detail, duplicate=True)
 
-    def _remember(self, request_id: str | None, action: Action) -> None:
+    def _remember(self, player: str, request_id: str | None, action: Action) -> None:
         if not request_id:
             return
-        self._requests[request_id] = action
-        self._requests.move_to_end(request_id)
+        key = (player, request_id)
+        self._requests[key] = action
+        self._requests.move_to_end(key)
         while len(self._requests) > self.cfg.request_cache_size:
             self._requests.popitem(last=False)

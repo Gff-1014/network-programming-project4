@@ -51,6 +51,12 @@ class Settings:
     # 默认房间：大厅是登录后自动进入的房间，不可退出
     lobby_room: str = _env_str("DDZ_LOBBY_ROOM", "大厅")
     chat_rooms: tuple[str, ...] = ("聊天房",)
+    # 牌桌：三人一桌，其余人可作观战
+    table_rooms: tuple[str, ...] = ("牌桌1", "牌桌2", "牌桌3")
+    seats_per_table: int = _env_int("DDZ_SEATS_PER_TABLE", 3)
+    max_spectators: int = _env_int("DDZ_MAX_SPECTATORS", 2)
+    # 断线托管：轮到自己后多久自动出牌（毫秒）
+    auto_play_delay_ms: int = _env_int("DDZ_AUTO_PLAY_DELAY_MS", 1000)
 
 
 settings = Settings()

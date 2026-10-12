@@ -40,6 +40,9 @@ async def heartbeat_sweeper(hub: Hub) -> None:
                 logger.info("[%s] 静默 %d ms，判定失效", session.conn_id, idle)
                 await session.close_for_idle()
         hub.sweep_reservations()
+        for room in hub.rooms.values():
+            if room.table is not None:
+                await room.table.tick(now)
 
 
 async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
