@@ -62,6 +62,7 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
         self.container.pack(fill="both", expand=True)
         if UI_CTK_ENABLED:  # [UI-CTK] CustomTkinter 皮肤
             ui_ctk.apply_theme()
+            self.configure(fg_color=ui_ctk.APP_BG)   # 根窗口底色与内容一致，避免留出浅色边
             ui_ctk.style_ttk(ttk.Style())
             self.container.configure(style="Ctk.TFrame")
             self.frames = {

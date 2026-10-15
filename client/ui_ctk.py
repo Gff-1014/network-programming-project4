@@ -69,12 +69,41 @@ def apply_theme(appearance: str = "dark", theme: str = "green") -> None:
 
 
 def style_ttk(style) -> None:
-    """把牌桌里保留的 ttk 容器调成同一套深色，避免两套风格割裂。"""
-    style.configure("Ctk.TFrame", background=APP_BG)
-    style.configure("CtkCard.TFrame", background=CARD_BG)
-    style.configure("Ctk.TLabelframe", background=APP_BG, borderwidth=0)
+    """把牌桌里保留的 ttk 控件调成同一套深色，避免出现浅灰色块。
+
+    关键点：Windows 上 ttk 默认用 `vista` 主题，它**会忽略 background 之类的配置**，
+    所以必须先切到 `clam`，深色才会真正生效；同时要把边框的亮/暗色一起配掉，
+    否则 clam 会画出浅色的 3D 边框。
+    """
+    try:
+        style.theme_use("clam")
+    except Exception:  # pragma: no cover - 主题名异常时保持原样
+        pass
+
+    flat = {"borderwidth": 0, "relief": "flat"}
+    edge = {"bordercolor": CARD_BG_2, "lightcolor": CARD_BG_2, "darkcolor": CARD_BG_2}
+
+    style.configure("TFrame", background=APP_BG, **flat)
+    style.configure("Ctk.TFrame", background=APP_BG, **flat)
+    style.configure("CtkCard.TFrame", background=CARD_BG, **flat)
+    style.configure("TLabel", background=APP_BG, foreground=TEXT, **flat)
+    style.configure("Ctk.TLabel", background=APP_BG, foreground=TEXT_MUTED, **flat)
+    style.configure("CtkCard.TLabel", background=CARD_BG, foreground=TEXT, **flat)
+    style.configure("TLabelframe", background=APP_BG, **edge)
+    style.configure("TLabelframe.Label", background=APP_BG, foreground=TEXT_MUTED)
+    style.configure("Ctk.TLabelframe", background=APP_BG, **edge)
     style.configure("Ctk.TLabelframe.Label", background=APP_BG, foreground=TEXT_MUTED)
-    style.configure("Ctk.TLabel", background=APP_BG, foreground=TEXT_MUTED)
+    # 下面几类当前皮肤用不到，一并配好：以后混用不会再冒出浅色块
+    style.configure("TButton", background=CARD_BG_2, foreground=TEXT, focuscolor=ACCENT, **edge)
+    style.map("TButton", background=[("active", ACCENT_HOVER), ("disabled", CARD_BG)],
+              foreground=[("disabled", TEXT_MUTED)])
+    style.configure("TEntry", fieldbackground=CARD_BG_2, foreground=TEXT, insertcolor=TEXT, **edge)
+    style.configure("TCombobox", fieldbackground=CARD_BG_2, background=CARD_BG_2,
+                    foreground=TEXT, arrowcolor=TEXT, **edge)
+    style.map("TCombobox", fieldbackground=[("readonly", CARD_BG_2)],
+              foreground=[("readonly", TEXT)])
+    style.configure("Vertical.TScrollbar", background=CARD_BG_2, troughcolor=APP_BG,
+                    bordercolor=APP_BG, arrowcolor=TEXT)
 
 
 # ------------------------------------------------------------ 登录页 ----
@@ -143,6 +172,8 @@ class LobbyFrame(ctk.CTkFrame):
         ctk.CTkLabel(left, text="房间（点一下直接进入）", font=ctk.CTkFont(*FONT_SUB),
                      text_color=TEXT_MUTED).pack(anchor="w", padx=12, pady=(10, 4))
         self.rooms_box = ctk.CTkScrollableFrame(left, fg_color="transparent")
+        self.rooms_box.configure(scrollbar_button_color=CARD_BG_2,
+                                 scrollbar_button_hover_color=ACCENT_HOVER)
         self.rooms_box.pack(fill="both", expand=True, padx=6, pady=(0, 8))
         ctk.CTkButton(left, text="刷新房间", width=110, fg_color=CARD_BG_2, hover_color="#3A3A3A",
                       command=self._refresh).pack(anchor="w", padx=12, pady=(0, 12))
@@ -152,6 +183,8 @@ class LobbyFrame(ctk.CTkFrame):
         ctk.CTkLabel(right, text="在线用户", font=ctk.CTkFont(*FONT_SUB),
                      text_color=TEXT_MUTED).pack(anchor="w", padx=12, pady=(10, 4))
         self.users_box = ctk.CTkScrollableFrame(right, fg_color="transparent")
+        self.users_box.configure(scrollbar_button_color=CARD_BG_2,
+                                 scrollbar_button_hover_color=ACCENT_HOVER)
         self.users_box.pack(fill="both", expand=True, padx=6, pady=(0, 12))
 
     # ---------- 事件 ----------
@@ -210,12 +243,16 @@ class RoomFrame(ctk.CTkFrame):
 
         self.messages = ctk.CTkScrollableFrame(body, fg_color=CARD_BG, corner_radius=14)
         self.messages.pack(side="left", fill="both", expand=True)
+        self.messages.configure(scrollbar_button_color=CARD_BG_2,
+                                scrollbar_button_hover_color=ACCENT_HOVER)
 
         side = ctk.CTkFrame(body, fg_color=CARD_BG, corner_radius=14, width=180)
         side.pack(side="left", fill="y", padx=(12, 0))
         ctk.CTkLabel(side, text="房间里的人（选中可私信）", font=ctk.CTkFont("Microsoft YaHei UI", 10),
                      text_color=TEXT_MUTED).pack(anchor="w", padx=10, pady=(10, 4))
         self.users_box = ctk.CTkScrollableFrame(side, fg_color="transparent", width=150)
+        self.users_box.configure(scrollbar_button_color=CARD_BG_2,
+                                 scrollbar_button_hover_color=ACCENT_HOVER)
         self.users_box.pack(fill="y", expand=True, padx=6, pady=(0, 8))
         self._selected_user: str | None = None
         self.whisper_hint = ctk.CTkLabel(side, text="未选中用户", font=ctk.CTkFont("Microsoft YaHei UI", 10),
@@ -367,6 +404,10 @@ def make_table_frame():
             self.chat_target = ctk.CTkComboBox(chat_row, values=["（发到房间）"], width=140,
                                                fg_color=CARD_BG_2, border_width=0,
                                                button_color=CARD_BG_2, button_hover_color=ACCENT_HOVER,
+                                               dropdown_fg_color=CARD_BG_2,
+                                               dropdown_hover_color=ACCENT_HOVER,
+                                               dropdown_text_color=TEXT,
+                                               text_color=TEXT,
                                                command=lambda _v: None)
             self.chat_target.set("（发到房间）")
             self.chat_target.pack(side="left")
