@@ -90,8 +90,8 @@ class Session:
             read_frame(self.reader, self.cfg.max_frame_bytes), timeout
         )
         self.last_seen_ms = protocol.now_ms()
-        if payload.get("type") not in ("login", "resume"):
-            self.send(error(ErrCode.NOT_LOGGED_IN, "首个消息必须是 login 或 resume",
+        if payload.get("type") not in ("login", "resume", "register"):
+            self.send(error(ErrCode.NOT_LOGGED_IN, "首个消息必须是 login / resume / register",
                             payload.get("request_id")))
             await self.close("handshake rejected")
             return None

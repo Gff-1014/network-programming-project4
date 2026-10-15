@@ -71,6 +71,7 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
                 "connect": ui_ctk.ConnectFrame(self.container, self),
                 "lobby": ui_ctk.LobbyFrame(self.container, self),
                 "room": ui_ctk.RoomFrame(self.container, self),
+                "private": ui_ctk.PrivateChatFrame(self.container, self),
                 "table": ui_ctk.make_table_frame()(self.container, self),
             }
         else:  # 经典皮肤（本次美化之前的样子）
@@ -78,6 +79,7 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
                 "connect": ConnectFrame(self.container, self),
                 "lobby": LobbyFrame(self.container, self),
                 "room": RoomFrame(self.container, self),
+                "private": PrivateFrame(self.container, self),
                 "table": TableFrame(self.container, self),
             }
         for frame in self.frames.values():
@@ -176,11 +178,14 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
         elif kind == "group_deleted":
             self.status_var.set(f"群聊 {data.get('room')} 已解散")
             self.show("lobby")
+        elif kind == "private_opened":
+            self.status_var.set(f"与 {data.get('peer')} 的私聊")
+            self.show("private")
         elif kind == "disconnected":
             self.status_var.set("连接已断开")
             messagebox.showwarning("连接断开", "与服务器的连接已断开")
             self.show("connect")
-        for name in ("lobby", "room", "table"):
+        for name in ("lobby", "room", "private", "table"):
             frame = self.frames.get(name)
             if frame is not None and frame.winfo_ismapped():
                 handler = getattr(frame, "on_event", None)
@@ -245,6 +250,20 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
             return
         self.call(self.session.logout(), "登出失败")
 
+    def do_register(self) -> None:
+        """用登录页填的账号 + 密码创建账号，成功后直接进入大厅。"""
+        host, port = self.host_var.get().strip(), self.port_var.get().strip()
+        account, password = self.account_var.get().strip(), self.password_var.get()
+        if not account or not password:
+            messagebox.showinfo("提示", "创建账号请输入账号与密码（密码至少 4 位）")
+            return
+
+        async def run() -> None:
+            await self.session.connect(host, int(port))
+            await self.session.register(account, password)
+
+        self.call(run(), "创建账号失败")
+
     def do_join(self, room: str) -> None:
         async def run() -> None:
             try:
@@ -268,15 +287,29 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
         self.call(self.session.say(text), "发送失败")
 
     def do_whisper(self, to: str) -> None:
-        """给某位在线用户发私信（弹窗输入内容）。"""
-        from .dialogs import ask_text
+        """点在线玩家 → 打开与他的私聊界面。"""
+        self.do_open_private(to)
 
-        if not to:
-            messagebox.showinfo("提示", "请先选择一位在线用户")
+    def do_open_private(self, peer: str) -> None:
+        """打开与某人的私聊界面（会拉取历史消息）。"""
+        if not peer:
+            messagebox.showinfo("提示", "请先选择一位用户")
             return
-        text = ask_text(self, f"私信 {to}", f"发给 {to}：", use_ctk=UI_CTK_ENABLED)
-        if text:
-            self.call(self.session.whisper(to, text), "私信失败")
+        self.call(self.session.open_private(peer), "打开私聊失败")
+
+    def do_send_private(self) -> None:
+        """在私聊界面里发送一条消息。"""
+        text = self.chat_var.get().strip()
+        if not text:
+            return
+        self.chat_var.set("")
+        self.call(self.session.send_private(text), "私信失败")
+
+    def do_refresh_private(self) -> None:
+        """重新拉取当前私聊的历史消息。"""
+        peer = self.session.current_peer
+        if peer:
+            self.call(self.session.open_private(peer), "刷新私聊记录失败")
 
     def do_create_group(self) -> None:
         """邀请在线用户创建群聊。"""
@@ -373,8 +406,10 @@ class ConnectFrame(BaseFrame):
         pwd_entry.grid(row=1, column=1, sticky="w")
         ttk.Button(box, text="登录", command=app.do_login).grid(row=2, column=0, columnspan=2,
                                                                pady=(12, 0), sticky="ew")
+        ttk.Button(box, text="创建账号", command=app.do_register).grid(row=3, column=0, columnspan=2,
+                                                                     pady=(6, 0), sticky="ew")
         hint = ttk.Label(box, text="预置账号 wanjia1 ~ wanjia5，初始密码 123456", font=FONT_LOG)
-        hint.grid(row=3, column=0, columnspan=2, pady=(10, 0))
+        hint.grid(row=4, column=0, columnspan=2, pady=(10, 0))
         self.hint = hint
         app.password_entry = pwd_entry
         account_entry.focus_set()
@@ -412,6 +447,11 @@ class LobbyFrame(BaseFrame):
         self.room_list.pack(fill="both", expand=True)
         ttk.Button(left, text="进入选中房间", command=self._join_selected).pack(fill="x", pady=(8, 0))
         ttk.Button(left, text="刷新", command=self._refresh).pack(fill="x", pady=4)
+        ttk.Label(left, text="私聊会话（点一下打开）", font=FONT_LOG).pack(anchor="w", pady=(8, 2))
+        self.conv_list = tk.Listbox(left, font=FONT_UI, height=6, exportselection=False)
+        self.conv_list.pack(fill="x")
+        self.conv_list.bind("<Double-Button-1>", lambda _event: self._open_conversation())
+        ttk.Button(left, text="打开选中会话", command=self._open_conversation).pack(fill="x", pady=4)
 
         right = ttk.LabelFrame(body, text="在线玩家（点一下即可私聊）", padding=8)
         right.pack(side="left", fill="both", expand=True, padx=(8, 0))
@@ -429,10 +469,27 @@ class LobbyFrame(BaseFrame):
             return
         self.app.do_whisper(self.user_list.get(selection[0]))
 
+    def _open_conversation(self) -> None:
+        selection = self.conv_list.curselection()
+        if not selection:
+            messagebox.showinfo("提示", "请先选择一个私聊会话")
+            return
+        item = self.app.session.conversations[selection[0]]
+        self.app.do_open_private(item["peer"])
+
     def on_show(self) -> None:
         self.account_var_display.set(f"当前账号：{self.app.session.account or '-'}")
         self._refresh()
+        self._render_conversations()
         self.app.call(self.app.session.refresh_users(), "刷新在线玩家失败")
+
+    def _render_conversations(self) -> None:
+        """左侧显示"与谁聊过"的会话列表（私聊后自动出现）。"""
+        self.conv_list.delete(0, tk.END)
+        for item in self.app.session.conversations:
+            preview = item.get("last_text") or ""
+            preview = preview if len(preview) <= 14 else preview[:14] + "…"
+            self.conv_list.insert(tk.END, f"{item['peer']}：{preview}")
 
     def _refresh(self) -> None:
         self.app.call(self.app.session.refresh_rooms(), "刷新房间失败")
@@ -457,6 +514,8 @@ class LobbyFrame(BaseFrame):
                 self._render_users()
         elif kind == "user_list":
             self._render_users()
+        elif kind in ("conversations", "private_msg", "private_opened"):
+            self._render_conversations()
 
     def _render_users(self) -> None:
         """在线玩家 = 全服在线（拿不到时退回本房间成员）。"""
@@ -541,6 +600,54 @@ class RoomFrame(BaseFrame):
         self.log.insert(tk.END, text + "\n")
         self.log.see(tk.END)
         self.log.configure(state="disabled")
+
+
+class PrivateFrame(BaseFrame):
+    """私聊界面：显示与某人的历史消息，底部输入发送。"""
+
+    def __init__(self, parent, app: ChatApp) -> None:
+        super().__init__(parent, app)
+        header = ttk.Frame(self)
+        header.pack(fill="x")
+        self.title_var = tk.StringVar(value="私聊")
+        ttk.Label(header, textvariable=self.title_var, font=FONT_TITLE).pack(side="left")
+        ttk.Button(header, text="返回大厅", command=lambda: app.show("lobby")).pack(side="right")
+        ttk.Button(header, text="刷新记录", command=app.do_refresh_private).pack(
+            side="right", padx=(0, 8))
+
+        self.log = tk.Text(self, font=FONT_LOG, state="disabled", wrap="word")
+        self.log.pack(fill="both", expand=True, pady=8)
+        self.log.tag_configure("me", foreground="#2F6FED")
+        self.log.tag_configure("peer", foreground="#1A1A1A")
+
+        bottom = ttk.Frame(self)
+        bottom.pack(fill="x")
+        entry = ttk.Entry(bottom, textvariable=app.chat_var, font=FONT_UI)
+        entry.pack(side="left", fill="x", expand=True)
+        entry.bind("<Return>", lambda _event: app.do_send_private())
+        ttk.Button(bottom, text="发送", command=app.do_send_private).pack(side="left", padx=6)
+        self.chat_entry = entry
+
+    def on_show(self) -> None:
+        self.render()
+
+    def render(self) -> None:
+        session = self.app.session
+        peer = session.current_peer or "-"
+        self.title_var.set(f"与 {peer} 的私聊")
+        self.log.configure(state="normal")
+        self.log.delete("1.0", tk.END)
+        for message in session.private_history.get(peer, []):
+            mine = message.get("from") == session.nickname
+            who = "我" if mine else message.get("from")
+            self.log.insert(tk.END, f"{who}: {message.get('text')}\n", "me" if mine else "peer")
+        self.log.see(tk.END)
+        self.log.configure(state="disabled")
+
+    def on_event(self, kind: str, data: dict) -> None:
+        if kind in ("private_opened", "history", "private_msg"):
+            if (data.get("peer") or self.app.session.current_peer) == self.app.session.current_peer:
+                self.render()
 
 
 class TableFrame(BaseFrame):

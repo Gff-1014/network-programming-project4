@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from .protocol import ErrCode, error, make, register
+from .protocol import ErrCode, error, make, now_ms, register
 
 
 def _require_login(session) -> bool:
@@ -56,6 +56,48 @@ async def on_login(session, data: dict, request_id: str | None) -> None:
             exclude=session,
         )
     session.hub.broadcast_room_list()
+
+
+@register("register")
+async def on_register(session, data: dict, request_id: str | None) -> None:
+    """创建账号：输入账号与密码即可，成功后直接登录进大厅。"""
+    if session.nickname is not None:
+        session.send(error(ErrCode.BAD_MESSAGE, "你已经登录", request_id))
+        return
+    account = data.get("account")
+    password = data.get("password", "")
+    if not isinstance(account, str) or not isinstance(password, str):
+        session.send(error(ErrCode.INVALID_NICKNAME, "缺少 account 或 password", request_id))
+        return
+    ok, code, message = session.hub.register(account, password)
+    if not ok:
+        session.send(error(code or ErrCode.INVALID_NICKNAME, message or "创建失败", request_id))
+        return
+    # 创建成功直接走登录流程（welcome 会带同一个 request_id 返回，客户端按登录处理）
+    await on_login(session, {"account": account, "password": password}, request_id)
+
+
+@register("list_conversations")
+async def on_list_conversations(session, data: dict, request_id: str | None) -> None:
+    if not _require_login(session):
+        return
+    session.send(make("conversations",
+                      {"items": session.hub.conversations_of(session.nickname)}, request_id))
+
+
+@register("get_history")
+async def on_get_history(session, data: dict, request_id: str | None) -> None:
+    """拉取与某人的私信历史（仅内存，服务端重启即清空）。"""
+    if not _require_login(session):
+        return
+    peer = data.get("peer")
+    if not isinstance(peer, str) or not peer:
+        session.send(error(ErrCode.BAD_MESSAGE, "缺少 peer", request_id))
+        return
+    session.send(make("history", {
+        "peer": peer,
+        "messages": session.hub.private_history(session.nickname, peer),
+    }, request_id))
 
 
 @register("logout")
@@ -253,6 +295,7 @@ async def on_private_msg(session, data: dict, request_id: str | None) -> None:
 
     payload = make("private_msg", {"from": session.nickname, "to": target, "text": text})
     receiver.send(payload)
+    session.hub.record_private(session.nickname, target, text, now_ms())
     session.send(make("private_msg", {"from": session.nickname, "to": target, "text": text,
                                      "self": True}, request_id))
 

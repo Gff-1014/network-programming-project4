@@ -111,6 +111,7 @@ class Hub:
         self.slow_consumer_disconnects = 0
         self.idle_timeouts = 0
         self._group_seq = 0
+        self.private_log: dict[tuple[str, str], list[dict]] = {}
 
     # ------------------------------------------------------------- 连接 ----
 
@@ -178,6 +179,54 @@ class Hub:
     def online_accounts(self) -> list[str]:
         """当前所有在线账号（不区分房间）。"""
         return sorted(self.by_nickname)
+
+    def register(self, account: str, password: str) -> tuple[bool, str | None, str | None]:
+        """创建账号：只校验规则与重名，不做邮箱/验证码之类。"""
+        account = account.strip()
+        if not account or len(account) > self.cfg.max_nickname_chars:
+            return False, ErrCode.INVALID_NICKNAME, (
+                f"账号需为 1~{self.cfg.max_nickname_chars} 个字符"
+            )
+        if any(ch.isspace() for ch in account):
+            return False, ErrCode.INVALID_NICKNAME, "账号不能包含空白字符"
+        if len(password) < 4:
+            return False, ErrCode.WEAK_PASSWORD, "密码至少 4 位"
+        lowered = account.lower()
+        if any(known.lower() == lowered for known in self.cfg.account_passwords):
+            return False, ErrCode.ACCOUNT_EXISTS, "该账号已存在，请直接登录"
+        self.cfg.account_passwords[account] = password
+        return True, None, None
+
+    # ------------------------------------------------------------- 私信 ----
+
+    def record_private(self, sender: str, target: str, text: str, ts_ms: int) -> None:
+        """记录一条私信（按账号对归档，只保留最近若干条）。"""
+        key = tuple(sorted((sender, target)))
+        box = self.private_log.setdefault(key, [])
+        box.append({"from": sender, "to": target, "text": text, "ts_ms": ts_ms})
+        if len(box) > self.cfg.max_private_history:
+            del box[: len(box) - self.cfg.max_private_history]
+
+    def private_history(self, account: str, peer: str) -> list[dict]:
+        return list(self.private_log.get(tuple(sorted((account, peer))), []))
+
+    def conversations_of(self, account: str) -> list[dict]:
+        """会话摘要列表：和谁聊过、最后一条、条数与时间（按时间倒序）。"""
+        items: list[dict] = []
+        for (a, b), messages in self.private_log.items():
+            if account not in (a, b) or not messages:
+                continue
+            peer = b if a == account else a
+            last = messages[-1]
+            items.append({
+                "peer": peer,
+                "count": len(messages),
+                "last_text": last["text"],
+                "last_from": last["from"],
+                "last_ts_ms": last["ts_ms"],
+            })
+        items.sort(key=lambda item: item["last_ts_ms"], reverse=True)
+        return items
 
     def resume(self, session: "Session", token: str) -> tuple[bool, str | None, str | None]:
         """凭 token 恢复会话：昵称、房间一并恢复，并换发新 token。"""

@@ -18,12 +18,15 @@ from typing import Awaitable, Callable
 # 客户端 → 服务端
 C2S_TYPES = (
     "login",
+    "register",
     "resume",
     "pong",
     "logout",
     "ping",
     "list_rooms",
     "list_users",
+    "list_conversations",
+    "get_history",
     "join_room",
     "leave_room",
     "create_group",
@@ -48,6 +51,8 @@ S2C_TYPES = (
     "pong",
     "room_list",
     "user_list",
+    "conversations",
+    "history",
     "joined",
     "left",
     "room_users",
@@ -100,6 +105,8 @@ class ErrCode(str):
     UNKNOWN_ACCOUNT = "UNKNOWN_ACCOUNT"
     BAD_CREDENTIALS = "BAD_CREDENTIALS"
     ACCOUNT_LOGGED_IN = "ACCOUNT_LOGGED_IN"
+    ACCOUNT_EXISTS = "ACCOUNT_EXISTS"
+    WEAK_PASSWORD = "WEAK_PASSWORD"
     GROUP_NOT_FOUND = "GROUP_NOT_FOUND"
     NOT_GROUP_OWNER = "NOT_GROUP_OWNER"
     GROUP_MEMBER_OFFLINE = "GROUP_MEMBER_OFFLINE"

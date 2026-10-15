@@ -141,9 +141,13 @@ class ConnectFrame(ctk.CTkFrame):
                       font=ctk.CTkFont("Microsoft YaHei UI", 13, "bold"),
                       command=app.do_login).grid(row=4, column=0, columnspan=3,
                                                  pady=(18, 8), padx=28, sticky="ew")
+        ctk.CTkButton(card, text="创建账号", height=32, corner_radius=10,
+                      fg_color=CARD_BG_2, hover_color="#3A3A3A", text_color=TEXT,
+                      command=app.do_register).grid(row=5, column=0, columnspan=3,
+                                                    pady=(0, 10), padx=28, sticky="ew")
         self.hint = ctk.CTkLabel(card, text="预置账号 wanjia1 ~ wanjia5，初始密码 123456",
                                  font=ctk.CTkFont("Microsoft YaHei UI", 10), text_color=TEXT_MUTED)
-        self.hint.grid(row=5, column=0, columnspan=3, pady=(0, 20), padx=28)
+        self.hint.grid(row=6, column=0, columnspan=3, pady=(0, 20), padx=28)
 
     def on_show(self) -> None:
         return
@@ -203,13 +207,35 @@ class LobbyFrame(ctk.CTkFrame):
                       hover_color="#3A3A3A", command=self.app.do_refresh_users).pack(
             anchor="w", padx=12, pady=(0, 12))
 
+        conv = ctk.CTkFrame(body, fg_color=CARD_BG, corner_radius=14, width=200)
+        conv.pack(side="left", fill="both", padx=(12, 0))
+        ctk.CTkLabel(conv, text="私聊会话（点一下打开）", font=ctk.CTkFont("Microsoft YaHei UI", 10),
+                     text_color=TEXT_MUTED).pack(anchor="w", padx=12, pady=(10, 4))
+        self.conv_box = ctk.CTkScrollableFrame(conv, fg_color="transparent", width=180)
+        self.conv_box.configure(scrollbar_button_color=CARD_BG_2,
+                                scrollbar_button_hover_color=ACCENT_HOVER)
+        self.conv_box.pack(fill="both", expand=True, padx=6, pady=(0, 12))
+
     # ---------- 事件 ----------
 
     def on_show(self) -> None:
         self._refresh()
         self._render_users()
+        self._render_conversations()
         self.account_label.configure(text=f"当前账号：{self.app.session.account or '-'}")
         self.app.call(self.app.session.refresh_users(), "刷新在线玩家失败")
+
+    def _render_conversations(self) -> None:
+        for child in self.conv_box.winfo_children():
+            child.destroy()
+        for item in self.app.session.conversations:
+            preview = item.get("last_text") or ""
+            preview = preview if len(preview) <= 12 else preview[:12] + "…"
+            ctk.CTkButton(self.conv_box, text=f"{item['peer']}：{preview}", anchor="w",
+                          height=30, corner_radius=8, fg_color=CARD_BG_2,
+                          hover_color=ACCENT_HOVER, text_color=TEXT,
+                          command=lambda p=item["peer"]: self.app.do_open_private(p)).pack(
+                fill="x", pady=2, padx=4)
 
     def _refresh(self) -> None:
         self.app.call(self.app.session.refresh_rooms(), "刷新房间失败")
@@ -249,9 +275,72 @@ class LobbyFrame(ctk.CTkFrame):
             self._render_users()
         elif kind == "user_list":
             self._render_users()
+        elif kind in ("conversations", "private_msg", "private_opened"):
+            self._render_conversations()
 
 
 # ------------------------------------------------------------ 聊天室 ----
+
+class PrivateChatFrame(ctk.CTkFrame):
+    """私聊界面（CustomTkinter 皮肤）：气泡显示历史，底部输入。"""
+
+    def __init__(self, parent, app) -> None:
+        super().__init__(parent, fg_color=APP_BG, corner_radius=0)
+        self.app = app
+
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=16, pady=(12, 6))
+        self.title_var = tk.StringVar(value="私聊")
+        ctk.CTkLabel(header, textvariable=self.title_var, font=ctk.CTkFont(*FONT_TITLE)).pack(side="left")
+        ctk.CTkButton(header, text="返回大厅", width=100, fg_color=CARD_BG_2, hover_color="#3A3A3A",
+                      command=lambda: app.show("lobby")).pack(side="right")
+        ctk.CTkButton(header, text="刷新记录", width=100, fg_color=CARD_BG_2, hover_color="#3A3A3A",
+                      command=app.do_refresh_private).pack(side="right", padx=(0, 8))
+
+        self.messages = ctk.CTkScrollableFrame(self, fg_color=CARD_BG, corner_radius=14)
+        self.messages.configure(scrollbar_button_color=CARD_BG_2,
+                                scrollbar_button_hover_color=ACCENT_HOVER)
+        self.messages.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.pack(fill="x", padx=16, pady=(0, 14))
+        entry = ctk.CTkEntry(bottom, textvariable=app.chat_var, height=34, corner_radius=10,
+                             fg_color=CARD_BG_2, border_width=0)
+        entry.pack(side="left", fill="x", expand=True)
+        entry.bind("<Return>", lambda _event: app.do_send_private())
+        self.chat_entry = entry
+        ctk.CTkButton(bottom, text="发送", width=80, height=34, corner_radius=10,
+                      fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="#0B0B0B",
+                      command=app.do_send_private).pack(side="left", padx=(8, 0))
+
+    def on_show(self) -> None:
+        self.render()
+
+    def render(self) -> None:
+        session = self.app.session
+        peer = session.current_peer or "-"
+        self.title_var.set(f"与 {peer} 的私聊")
+        for child in self.messages.winfo_children():
+            child.destroy()
+        for message in session.private_history.get(peer, []):
+            mine = message.get("from") == session.nickname
+            who = "我" if mine else message.get("from")
+            ctk.CTkLabel(
+                self.messages, text=f"{who}: {message.get('text')}",
+                font=ctk.CTkFont(*FONT_MONO_BUBBLE), justify="left", wraplength=520,
+                fg_color=MY_BUBBLE if mine else OTHER_BUBBLE, corner_radius=10,
+                text_color=TEXT, padx=10, pady=6,
+            ).pack(anchor="e" if mine else "w", padx=10, pady=4)
+        try:
+            self.messages._parent_canvas.yview_moveto(1.0)
+        except Exception:  # pragma: no cover
+            pass
+
+    def on_event(self, kind: str, data: dict) -> None:
+        if kind in ("private_opened", "history", "private_msg"):
+            if (data.get("peer") or self.app.session.current_peer) == self.app.session.current_peer:
+                self.render()
+
 
 class RoomFrame(ctk.CTkFrame):
     def __init__(self, parent, app) -> None:

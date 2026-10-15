@@ -169,6 +169,17 @@ class Connection:
     async def logout(self, timeout: float = 3.0) -> dict:
         return await self.request("logout", {}, timeout)
 
+    async def register(self, account: str, password: str, timeout: float = 5.0) -> dict:
+        """创建账号（成功后服务端会直接完成登录）。"""
+        return await self.request("register", {"account": account, "password": password},
+                                  timeout)
+
+    async def list_conversations(self, timeout: float = 5.0) -> dict:
+        return await self.request("list_conversations", {}, timeout)
+
+    async def get_history(self, peer: str, timeout: float = 5.0) -> dict:
+        return await self.request("get_history", {"peer": peer}, timeout)
+
     async def create_group(self, members: list[str], timeout: float = 5.0) -> dict:
         return await self.request("create_group", {"members": members}, timeout)
 

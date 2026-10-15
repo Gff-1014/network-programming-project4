@@ -27,6 +27,9 @@ class ClientSession:
         self.rooms: list[dict] = []
         self.room_users: list[str] = []
         self.online_users: list[str] = []
+        self.conversations: list[dict] = []
+        self.private_history: dict[str, list[dict]] = {}
+        self.current_peer: str | None = None
         self.hand: list[int] = []
         self.table: dict[str, Any] = {}
         self.auto_play = False
@@ -73,14 +76,54 @@ class ClientSession:
     async def login(self, account: str, password: str = "123456") -> dict:
         assert self.conn is not None
         welcome = await self.conn.login(account, password)
-        data = welcome["data"]
-        self.account = data.get("account") or data["nickname"]
-        self.nickname = data["nickname"]
+        data = self._apply_welcome(welcome["data"])
+        self.on_event("logged_in", data)
+        await self.refresh_conversations()
+        return data
+
+    async def register(self, account: str, password: str) -> dict:
+        """创建账号并直接登录。"""
+        assert self.conn is not None
+        welcome = await self.conn.register(account, password)
+        data = self._apply_welcome(welcome["data"])
+        self.on_event("registered", {"account": self.account})
+        self.on_event("logged_in", data)
+        await self.refresh_conversations()
+        return data
+
+    def _apply_welcome(self, data: dict) -> dict:
+        """把 welcome 内容同步到本地状态（登录与注册共用）。"""
+        self.account = data.get("account") or data.get("nickname")
+        self.nickname = data.get("nickname") or self.account
         self.token = data.get("token")
         self.room = data.get("room")
         self.rooms = data.get("rooms", [])
-        self.on_event("logged_in", data)
+        self.role = "player"
         return data
+
+    async def refresh_conversations(self) -> None:
+        """刷新私信会话列表（与谁聊过、最后一条）。"""
+        if self.conn is None or self._closed:
+            return
+        reply = await self.conn.list_conversations()
+        self.conversations = list(reply["data"].get("items") or [])
+        self.on_event("conversations", {"items": self.conversations})
+
+    async def open_private(self, peer: str) -> None:
+        """打开与某人的私聊：拉取历史消息并切换界面。"""
+        if self.conn is None or self._closed or not peer:
+            return
+        self.current_peer = peer
+        reply = await self.conn.get_history(peer)
+        self.private_history[peer] = list(reply["data"].get("messages") or [])
+        self.on_event("private_opened", {"peer": peer,
+                                         "messages": self.private_history[peer]})
+
+    async def send_private(self, text: str) -> None:
+        if not self.current_peer:
+            raise RuntimeError("还没有选择私聊对象")
+        await self.whisper(self.current_peer, text)
+        await self.refresh_conversations()
 
     async def logout(self) -> None:
         """登出：通知服务端释放账号，清空本地状态，回到登录页。"""
@@ -233,6 +276,13 @@ class ClientSession:
             line = f"[群聊] {data.get('owner')} 解散了 {data.get('room')}"
         elif kind == "logged_out":
             line = "[账号] 已登出"
+        elif kind == "conversations":
+            self.conversations = list(data.get("items") or [])
+        elif kind == "history":
+            peer = data.get("peer") or ""
+            self.private_history[peer] = list(data.get("messages") or [])
+        elif kind == "registered":
+            line = f"[账号] 已创建账号 {data.get('account')}"
         elif kind in ("game_start", "hand"):
             self.hand = [parse_card(code) for code in data.get("hand", [])]
             label = "发牌" if kind == "game_start" else "拿到底牌"
@@ -282,7 +332,14 @@ class ClientSession:
             speaker = "我" if data.get("from") == self.nickname else data.get("from")
             line = f"{speaker}: {data.get('text')}"
         elif kind == "private_msg":
-            if data.get("self") or data.get("from") == self.nickname:
+            mine = bool(data.get("self")) or data.get("from") == self.nickname
+            peer = data.get("to") if mine else data.get("from")
+            if peer:
+                self.private_history.setdefault(peer, []).append({
+                    "from": data.get("from"), "to": data.get("to"),
+                    "text": data.get("text"), "ts_ms": data.get("ts_ms"),
+                })
+            if mine:
                 line = f"（私信）我 → {data.get('to')}: {data.get('text')}"
             else:
                 line = f"（私信）{data.get('from')} → 我: {data.get('text')}"

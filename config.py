@@ -75,6 +75,8 @@ class Settings:
         "wanjia5": "123456",
     })
     auto_register: bool = _env_int("DDZ_AUTO_REGISTER", 0) == 1
+    # 私信历史（仅内存，服务端重启即清空）：每个会话最多保留多少条
+    max_private_history: int = _env_int("DDZ_MAX_PRIVATE_HISTORY", 300)
 
     def __post_init__(self) -> None:
         # 额外账号并入账号表（不覆盖预置账号的密码）

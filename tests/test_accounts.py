@@ -120,6 +120,62 @@ async def test_strict_mode_rejects_unknown_account(server_factory):
 # --------------------------------------------------------------- 群聊 ----
 
 
+# --------------------------------------------------------- 注册与私信 ----
+
+
+async def test_register_creates_account_and_logs_in(server_factory):
+    """登录页"创建账号"：输入账号密码即可，成功后直接进入大厅。"""
+    server = await server_factory(auto_register=False)
+    conn = await Connection.connect(server.host, server.port)
+    welcome = await conn.register("newplayer", "abc123")
+    assert welcome["data"]["account"] == "newplayer"
+    assert welcome["data"]["room"] == "大厅", "注册成功后应直接登录"
+    await conn.request("logout", {})          # 主动登出，账号立即释放
+    await asyncio.sleep(0.2)
+    await conn.close()
+
+    # 新账号之后可以用同一密码登录
+    again = await Connection.connect(server.host, server.port)
+    info = await again.login("newplayer", "abc123")
+    assert info["data"]["account"] == "newplayer"
+    await again.close()
+
+
+async def test_register_rejects_duplicate_and_weak_password(server_factory):
+    server = await server_factory(auto_register=False)
+    conn = await Connection.connect(server.host, server.port)
+    with pytest.raises(ServerError) as exc:
+        await conn.register("wanjia1", "abc123")
+    assert exc.value.code == ErrCode.ACCOUNT_EXISTS
+    with pytest.raises(ServerError) as exc:
+        await conn.register("brandnew", "123")
+    assert exc.value.code == ErrCode.WEAK_PASSWORD
+    await conn.close()
+
+
+async def test_private_history_and_conversations(server):
+    """私信要能查到历史，并在会话列表里出现。"""
+    alice = await Connection.connect(server.host, server.port)
+    await alice.login("wanjia1", PASSWORD)
+    bob = await Connection.connect(server.host, server.port)
+    await bob.login("wanjia2", PASSWORD)
+
+    await alice.private_msg("wanjia2", "第一条私信")
+    await bob.private_msg("wanjia1", "收到，这是回复")
+    await asyncio.sleep(0.2)
+
+    history = (await alice.request("get_history", {"peer": "wanjia2"}))["data"]["messages"]
+    assert [m["text"] for m in history] == ["第一条私信", "收到，这是回复"]
+    assert history[0]["from"] == "wanjia1"
+
+    items = (await bob.request("list_conversations", {}))["data"]["items"]
+    assert items and items[0]["peer"] == "wanjia1"
+    assert items[0]["count"] == 2
+    assert items[0]["last_text"] == "收到，这是回复"
+    await alice.close()
+    await bob.close()
+
+
 async def test_create_group_invites_members(server):
     conns = []
     for account in ("wanjia1", "wanjia2", "wanjia3"):
