@@ -38,6 +38,7 @@ class Room:
         self.name = name
         self.kind = kind
         self.members: dict[str, "Session"] = {}
+        self.owner: str | None = None      # 群聊的群主账号
         self.table: Table | None = None
 
     def add(self, session: "Session") -> None:
@@ -61,7 +62,8 @@ class Room:
         return sent
 
     def snapshot(self) -> dict:
-        return {"name": self.name, "kind": self.kind, "count": len(self.members)}
+        return {"name": self.name, "kind": self.kind, "count": len(self.members),
+                "owner": self.owner}
 
 
 class Hub:
@@ -84,6 +86,7 @@ class Hub:
         self.dropped_total = 0
         self.slow_consumer_disconnects = 0
         self.idle_timeouts = 0
+        self._group_seq = 0
 
     # ------------------------------------------------------------- 连接 ----
 
@@ -98,23 +101,39 @@ class Hub:
     def _new_token(self) -> str:
         return secrets.token_hex(16)
 
-    def login(self, session: "Session", nickname: str) -> tuple[bool, str | None, str | None]:
-        """首次登录：校验昵称、签发 token、进入大厅。"""
-        nickname = nickname.strip()
-        if not nickname or len(nickname) > self.cfg.max_nickname_chars:
-            return False, ErrCode.INVALID_NICKNAME, (
-                f"昵称需为 1~{self.cfg.max_nickname_chars} 个字符"
-            )
-        if any(ch.isspace() for ch in nickname):
-            return False, ErrCode.INVALID_NICKNAME, "昵称不能包含空白字符"
-        if nickname in self.by_nickname:
-            return False, ErrCode.NICKNAME_TAKEN, "该昵称已在线"
-        if nickname in self.reserved_names:
-            return False, ErrCode.NICKNAME_TAKEN, "该昵称的会话正在重连中，请稍候或换一个"
+    def login(self, session: "Session", account: str,
+              password: str = "") -> tuple[bool, str | None, str | None]:
+        """登录：校验账号与密码、签发 token、进入大厅。
 
-        session.nickname = nickname
+        * 预置账号（见 config.account_passwords）密码必须匹配；
+        * 未预置的账号：`auto_register` 打开时首次登录即注册（密码随本次输入），
+          关闭时报"账号不存在"，即严格模式。
+        * 同一账号只能有一个在线连接，重复登录会被拒。
+        """
+        account = account.strip()
+        if not account or len(account) > self.cfg.max_nickname_chars:
+            return False, ErrCode.INVALID_NICKNAME, (
+                f"账号需为 1~{self.cfg.max_nickname_chars} 个字符"
+            )
+        if any(ch.isspace() for ch in account):
+            return False, ErrCode.INVALID_NICKNAME, "账号不能包含空白字符"
+
+        expected = self.cfg.account_passwords.get(account)
+        if expected is None:
+            if not self.cfg.auto_register:
+                return False, ErrCode.UNKNOWN_ACCOUNT, "账号不存在"
+            self.cfg.account_passwords[account] = password   # 首次登录即注册
+        elif password != expected:
+            return False, ErrCode.BAD_CREDENTIALS, "账号或密码不正确"
+
+        if account in self.by_nickname:
+            return False, ErrCode.ACCOUNT_LOGGED_IN, "该账号已在其它客户端登录"
+        if account in self.reserved_names:
+            return False, ErrCode.ACCOUNT_LOGGED_IN, "该账号刚刚掉线，正在重连保护中（60 秒）"
+
+        session.nickname = account
         session.token = self._new_token()
-        self.by_nickname[nickname] = session
+        self.by_nickname[account] = session
         self._enter_room(session, self.cfg.lobby_room)
         return True, None, None
 
@@ -246,6 +265,59 @@ class Hub:
 
     def room_of(self, session: "Session") -> Room | None:
         return self.rooms.get(session.room) if session.room else None
+
+    # ------------------------------------------------------------- 群聊 ----
+
+    def create_group(self, owner: "Session",
+                     members: list[str]) -> tuple[bool, str | None, str | None, str | None]:
+        """邀请若干在线账号建群：所有被邀请者会被直接拉进新房间。"""
+        picked: list[str] = []
+        for raw in members:
+            name = raw.strip() if isinstance(raw, str) else ""
+            if not name or name == owner.nickname or name in picked:
+                continue
+            if name not in self.by_nickname:
+                return False, ErrCode.GROUP_MEMBER_OFFLINE, f"{name} 当前不在线", None
+            picked.append(name)
+        if not picked:
+            return False, ErrCode.BAD_MESSAGE, "请至少选择一位在线用户", None
+
+        self._group_seq += 1
+        room_name = f"群聊{self._group_seq}"
+        room = Room(room_name, kind="group")
+        room.owner = owner.nickname
+        self.rooms[room_name] = room
+
+        self.join(owner, room_name)
+        for name in picked:
+            member = self.by_nickname.get(name)
+            if member is not None:
+                self.join(member, room_name)
+
+        room.broadcast(make("group_created", {
+            "room": room_name, "owner": owner.nickname, "members": room.nicknames(),
+        }))
+        self.broadcast_room_list()
+        return True, None, None, room_name
+
+    def delete_group(self, session: "Session", room_name: str) -> tuple[bool, str | None, str | None]:
+        """解散群聊（仅群主）：成员回到大厅，房间被移除。"""
+        room = self.rooms.get(room_name)
+        if room is None or room.kind != "group":
+            return False, ErrCode.GROUP_NOT_FOUND, "群聊不存在"
+        if room.owner != session.nickname:
+            return False, ErrCode.NOT_GROUP_OWNER, "只有群主可以解散群聊"
+
+        room.broadcast(make("group_deleted", {"room": room_name, "owner": session.nickname}),
+                       droppable=True)
+        for member in list(room.members.values()):
+            self.join(member, self.cfg.lobby_room)
+        self.rooms.pop(room_name, None)
+        self.broadcast_room_list()
+        return True, None, None
+
+    def groups_of(self, session: "Session") -> list[dict]:
+        return [room.snapshot() for room in self.rooms.values() if room.kind == "group"]
 
     def find_by_nickname(self, nickname: str) -> "Session | None":
         return self.by_nickname.get(nickname)

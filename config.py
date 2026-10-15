@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 def _env_int(name: str, default: int) -> int:
@@ -47,6 +47,18 @@ class Settings:
 
     # 昵称限制
     max_nickname_chars: int = _env_int("DDZ_MAX_NICKNAME_CHARS", 32)
+
+    # 账号体系（课程演示）：预置 5 个账号，密码统一 123456。
+    # 未预置的账号在首次登录时自动注册（否则压测机器人 / AI 陪打没有身份可用）；
+    # 想只允许这 5 个账号，设 DDZ_AUTO_REGISTER=0。
+    account_passwords: dict[str, str] = field(default_factory=lambda: {
+        "wanjia1": "123456",
+        "wanjia2": "123456",
+        "wanjia3": "123456",
+        "wanjia4": "123456",
+        "wanjia5": "123456",
+    })
+    auto_register: bool = _env_int("DDZ_AUTO_REGISTER", 1) == 1
 
     # 默认房间：大厅是登录后自动进入的房间，不可退出
     lobby_room: str = _env_str("DDZ_LOBBY_ROOM", "大厅")

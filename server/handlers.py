@@ -36,14 +36,15 @@ async def on_login(session, data: dict, request_id: str | None) -> None:
     if session.nickname is not None:
         session.send(error(ErrCode.BAD_MESSAGE, "你已经登录", request_id))
         return
-    nickname = data.get("nickname")
-    if not isinstance(nickname, str):
-        session.send(error(ErrCode.INVALID_NICKNAME, "缺少 nickname", request_id))
+    account = data.get("account") or data.get("nickname")
+    password = data.get("password", "")
+    if not isinstance(account, str) or not isinstance(password, str):
+        session.send(error(ErrCode.INVALID_NICKNAME, "缺少 account 或 password", request_id))
         return
 
-    ok, code, message = session.hub.login(session, nickname)
+    ok, code, message = session.hub.login(session, account, password)
     if not ok:
-        session.send(error(code or ErrCode.INVALID_NICKNAME, message or "登录失败", request_id))
+        session.send(error(code or ErrCode.BAD_CREDENTIALS, message or "登录失败", request_id))
         return
 
     session.send(session.welcome_payload(request_id))
@@ -146,6 +147,40 @@ async def on_leave_room(session, data: dict, request_id: str | None) -> None:
         session.send(error(code or ErrCode.NOT_IN_ROOM, message or "退出失败", request_id))
         return
     session.send(make("left", {"room": previous, "to": session.room}, request_id))
+
+
+@register("create_group")
+async def on_create_group(session, data: dict, request_id: str | None) -> None:
+    """邀请在线用户创建群聊（被邀请者会被直接拉进群）。"""
+    if not _require_login(session):
+        return
+    members = data.get("members")
+    if not isinstance(members, list):
+        session.send(error(ErrCode.BAD_MESSAGE, "members 必须是账号数组", request_id))
+        return
+    ok, code, message, room_name = session.hub.create_group(session, members)
+    if not ok:
+        session.send(error(code or ErrCode.BAD_MESSAGE, message or "建群失败", request_id))
+        return
+    room = session.hub.rooms[room_name]
+    session.send(make("joined", {"room": room_name, "users": room.nicknames(),
+                                 "role": "player", "owner": session.nickname}, request_id))
+
+
+@register("delete_group")
+async def on_delete_group(session, data: dict, request_id: str | None) -> None:
+    """解散群聊（仅群主）。"""
+    if not _require_login(session):
+        return
+    room_name = data.get("room") or session.room
+    if not isinstance(room_name, str):
+        session.send(error(ErrCode.GROUP_NOT_FOUND, "缺少 room", request_id))
+        return
+    ok, code, message = session.hub.delete_group(session, room_name)
+    if not ok:
+        session.send(error(code or ErrCode.GROUP_NOT_FOUND, message or "解散失败", request_id))
+        return
+    session.send(make("left", {"room": room_name, "to": session.room}, request_id))
 
 
 @register("room_msg")

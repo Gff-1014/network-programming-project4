@@ -124,27 +124,26 @@ class ConnectFrame(ctk.CTkFrame):
             row=1, column=0, columnspan=4, pady=(0, 16), padx=28
         )
 
-        ctk.CTkLabel(card, text="服务器", font=ctk.CTkFont(*FONT_UI)).grid(row=2, column=0, sticky="e", pady=6)
-        ctk.CTkEntry(card, textvariable=app.host_var, width=150,
-                     fg_color=CARD_BG_2, border_width=0).grid(row=2, column=1)
-        ctk.CTkLabel(card, text="端口", font=ctk.CTkFont(*FONT_UI)).grid(row=2, column=2, padx=(12, 4))
-        ctk.CTkEntry(card, textvariable=app.port_var, width=70,
-                     fg_color=CARD_BG_2, border_width=0).grid(row=2, column=3)
+        ctk.CTkLabel(card, text="账号", font=ctk.CTkFont(*FONT_UI)).grid(row=2, column=0, sticky="e", pady=6)
+        account_entry = ctk.CTkEntry(card, textvariable=app.account_var, width=170,
+                                     fg_color=CARD_BG_2, border_width=0)
+        account_entry.grid(row=2, column=1, columnspan=2, sticky="w")
+        ctk.CTkLabel(card, text="密码", font=ctk.CTkFont(*FONT_UI)).grid(row=3, column=0, sticky="e", pady=6)
+        pwd_entry = ctk.CTkEntry(card, textvariable=app.password_var, width=170, show="*",
+                                 fg_color=CARD_BG_2, border_width=0)
+        pwd_entry.grid(row=3, column=1, columnspan=2, sticky="w")
+        account_entry.bind("<Return>", lambda _event: pwd_entry.focus_set())
+        pwd_entry.bind("<Return>", lambda _event: app.do_login())
+        account_entry.focus_set()
 
-        ctk.CTkLabel(card, text="昵称", font=ctk.CTkFont(*FONT_UI)).grid(row=3, column=0, sticky="e", pady=6)
-        entry = ctk.CTkEntry(card, textvariable=app.nick_var, width=150,
-                             fg_color=CARD_BG_2, border_width=0)
-        entry.grid(row=3, column=1, columnspan=3, sticky="w")
-        entry.bind("<Return>", lambda _event: app.do_login())
-
-        ctk.CTkButton(card, text="连接并进入大厅", height=38, corner_radius=10,
+        ctk.CTkButton(card, text="登录", height=38, corner_radius=10,
                       fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color="#0B0B0B",
                       font=ctk.CTkFont("Microsoft YaHei UI", 13, "bold"),
-                      command=app.do_login).grid(row=4, column=0, columnspan=4,
+                      command=app.do_login).grid(row=4, column=0, columnspan=3,
                                                  pady=(18, 8), padx=28, sticky="ew")
-        self.hint = ctk.CTkLabel(card, text="昵称重复、服务器未启动等情况会在这里说明原因",
+        self.hint = ctk.CTkLabel(card, text="预置账号 wanjia1 ~ wanjia5，初始密码 123456",
                                  font=ctk.CTkFont("Microsoft YaHei UI", 10), text_color=TEXT_MUTED)
-        self.hint.grid(row=5, column=0, columnspan=4, pady=(0, 20), padx=28)
+        self.hint.grid(row=5, column=0, columnspan=3, pady=(0, 20), padx=28)
 
     def on_show(self) -> None:
         return
@@ -152,6 +151,10 @@ class ConnectFrame(ctk.CTkFrame):
     def on_event(self, kind: str, data: dict) -> None:
         if kind == "error":
             self.hint.configure(text=f"{data.get('message')}（{data.get('code')}）", text_color=DANGER)
+        elif kind == "logged_out":
+            self.hint.configure(text="已登出，可换账号登录", text_color=ACCENT)
+            self.app.account_var.set("")
+            self.app.password_var.set("")
 
 
 # -------------------------------------------------------------- 大厅 ----
@@ -162,7 +165,17 @@ class LobbyFrame(ctk.CTkFrame):
         self.app = app
         self._room_names: list[str] = []
 
-        ctk.CTkLabel(self, text="大厅", font=ctk.CTkFont(*FONT_TITLE)).pack(anchor="w", padx=16, pady=(12, 6))
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(12, 6))
+        ctk.CTkLabel(head, text="大厅", font=ctk.CTkFont(*FONT_TITLE)).pack(side="left")
+        self.account_label = ctk.CTkLabel(head, text="当前账号：-", font=ctk.CTkFont(*FONT_UI),
+                                          text_color=TEXT_MUTED)
+        self.account_label.pack(side="left", padx=16)
+        ctk.CTkButton(head, text="登出账号", width=100, fg_color=CARD_BG_2, hover_color="#3A3A3A",
+                      command=self.app.do_logout).pack(side="right")
+        ctk.CTkButton(head, text="邀请建群", width=100, fg_color=ACCENT, text_color="#0B0B0B",
+                      hover_color=ACCENT_HOVER,
+                      command=self.app.do_create_group).pack(side="right", padx=(0, 8))
 
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=16, pady=(0, 12))
@@ -180,7 +193,7 @@ class LobbyFrame(ctk.CTkFrame):
 
         right = ctk.CTkFrame(body, fg_color=CARD_BG, corner_radius=14)
         right.pack(side="left", fill="both", expand=True, padx=(12, 0))
-        ctk.CTkLabel(right, text="在线用户", font=ctk.CTkFont(*FONT_SUB),
+        ctk.CTkLabel(right, text="在线用户（点一下即可私聊）", font=ctk.CTkFont(*FONT_SUB),
                      text_color=TEXT_MUTED).pack(anchor="w", padx=12, pady=(10, 4))
         self.users_box = ctk.CTkScrollableFrame(right, fg_color="transparent")
         self.users_box.configure(scrollbar_button_color=CARD_BG_2,
@@ -192,6 +205,7 @@ class LobbyFrame(ctk.CTkFrame):
     def on_show(self) -> None:
         self._refresh()
         self._render_users()
+        self.account_label.configure(text=f"当前账号：{self.app.session.account or '-'}")
 
     def _refresh(self) -> None:
         self.app.call(self.app.session.refresh_rooms(), "刷新房间失败")
@@ -214,11 +228,18 @@ class LobbyFrame(ctk.CTkFrame):
             child.destroy()
         names = self.app.session.room_users or [self.app.session.nickname or "-"]
         for name in names:
-            ctk.CTkLabel(self.users_box, text=f"　{name}", anchor="w").pack(fill="x", pady=2, padx=4)
+            if name == self.app.session.nickname:
+                ctk.CTkLabel(self.users_box, text=f"　{name}（我）", anchor="w",
+                             text_color=TEXT_MUTED).pack(fill="x", pady=2, padx=4)
+                continue
+            ctk.CTkButton(self.users_box, text=f"　{name}", anchor="w", height=28, corner_radius=8,
+                          fg_color=CARD_BG_2, hover_color=ACCENT_HOVER, text_color=TEXT,
+                          command=lambda n=name: self.app.do_whisper(n)).pack(fill="x", pady=2, padx=4)
 
     def on_event(self, kind: str, data: dict) -> None:
         if kind == "room_list":
             self._render_rooms(data.get("rooms", []))
+            self.account_label.configure(text=f"当前账号：{self.app.session.account or '-'}")
         elif kind == "room_users":
             self._render_users()
 
@@ -235,6 +256,11 @@ class RoomFrame(ctk.CTkFrame):
         header.pack(fill="x", padx=16, pady=(12, 6))
         self.title_var = tk.StringVar(value="聊天房")
         ctk.CTkLabel(header, textvariable=self.title_var, font=ctk.CTkFont(*FONT_TITLE)).pack(side="left")
+        self.group_var = tk.StringVar(value="")
+        ctk.CTkLabel(header, textvariable=self.group_var, font=ctk.CTkFont(*FONT_UI),
+                     text_color=TEXT_MUTED).pack(side="left", padx=12)
+        self.btn_dismiss = ctk.CTkButton(header, text="解散群聊", width=100, fg_color="#7A2E2E",
+                                         hover_color=DANGER, command=app.do_delete_group)
         ctk.CTkButton(header, text="离开房间", width=100, fg_color=CARD_BG_2, hover_color="#3A3A3A",
                       command=app.do_leave).pack(side="right")
 
@@ -327,11 +353,29 @@ class RoomFrame(ctk.CTkFrame):
 
     def on_show(self) -> None:
         self.title_var.set(f"聊天房 - {self.app.session.room}")
+        self._sync_group_controls()
         self.refresh_users()
+
+    def _sync_group_controls(self) -> None:
+        """群聊：显示群主，只有群主能看到"解散群聊"。"""
+        session = self.app.session
+        room = next((r for r in session.rooms if r.get("name") == session.room), None)
+        if room and room.get("kind") == "group":
+            owner = room.get("owner") or "-"
+            self.group_var.set(f"群聊（群主：{owner}）")
+            if owner == session.nickname:
+                self.btn_dismiss.pack(side="right", padx=(0, 8))
+            else:
+                self.btn_dismiss.pack_forget()
+        else:
+            self.group_var.set("")
+            self.btn_dismiss.pack_forget()
 
     def on_event(self, kind: str, data: dict) -> None:
         if kind == "room_users" and data.get("room") == self.app.session.room:
             self.refresh_users()
+        if kind in ("room_list", "joined", "group_created"):
+            self._sync_group_controls()
         if data.get("_line") and kind in ("room_msg", "private_msg", "user_joined",
                                           "user_left", "user_reconnecting", "error"):
             self.append_message(data["_line"], kind)

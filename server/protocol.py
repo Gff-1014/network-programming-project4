@@ -25,6 +25,8 @@ C2S_TYPES = (
     "list_rooms",
     "join_room",
     "leave_room",
+    "create_group",
+    "delete_group",
     "room_ready",
     "bid",
     "play",
@@ -51,6 +53,9 @@ S2C_TYPES = (
     "user_joined",
     "user_left",
     "user_reconnecting",
+    "group_created",
+    "group_deleted",
+    "logged_out",
     "room_msg",
     "private_msg",
     "game_start",
@@ -90,6 +95,12 @@ class ErrCode(str):
     MATCH_NOT_STARTED = "MATCH_NOT_STARTED"
     INVALID_BID = "INVALID_BID"
     INTERNAL = "INTERNAL"
+    UNKNOWN_ACCOUNT = "UNKNOWN_ACCOUNT"
+    BAD_CREDENTIALS = "BAD_CREDENTIALS"
+    ACCOUNT_LOGGED_IN = "ACCOUNT_LOGGED_IN"
+    GROUP_NOT_FOUND = "GROUP_NOT_FOUND"
+    NOT_GROUP_OWNER = "NOT_GROUP_OWNER"
+    GROUP_MEMBER_OFFLINE = "GROUP_MEMBER_OFFLINE"
 
 
 # ------------------------------------------------------------------ 构造函数 ----

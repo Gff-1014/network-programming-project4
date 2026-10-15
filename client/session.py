@@ -19,6 +19,7 @@ class ClientSession:
     def __init__(self, on_event: Callable[[str, dict], None] | None = None) -> None:
         self.conn: Connection | None = None
         self.on_event = on_event or (lambda kind, data: None)
+        self.account: str | None = None
         self.nickname: str | None = None
         self.token: str | None = None
         self.room: str | None = None
@@ -36,6 +37,7 @@ class ClientSession:
     # ------------------------------------------------------------ 连接 ----
 
     async def connect(self, host: str, port: int) -> None:
+        self._closed = False
         self.conn = await Connection.connect(host, port)
         self._pump_task = asyncio.create_task(self._pump())
 
@@ -67,10 +69,11 @@ class ClientSession:
 
     # ------------------------------------------------------------ 动作 ----
 
-    async def login(self, nickname: str) -> dict:
+    async def login(self, account: str, password: str = "123456") -> dict:
         assert self.conn is not None
-        welcome = await self.conn.login(nickname)
+        welcome = await self.conn.login(account, password)
         data = welcome["data"]
+        self.account = data.get("account") or data["nickname"]
         self.nickname = data["nickname"]
         self.token = data.get("token")
         self.room = data.get("room")
@@ -78,14 +81,50 @@ class ClientSession:
         self.on_event("logged_in", data)
         return data
 
-    async def refresh_rooms(self) -> None:
+    async def logout(self) -> None:
+        """登出：通知服务端释放账号，清空本地状态，回到登录页。"""
+        if self.conn is not None:
+            try:
+                await self.conn.send("logout")
+                await asyncio.sleep(0.05)
+            except Exception:
+                pass
+        await self.close()
+        self.account = None
+        self.nickname = None
+        self.token = None
+        self.room = None
+        self.role = None
+        self.hand = []
+        self.table = {}
+        self.room_users = []
+        self.auto_play = False
+        self.rooms = []
+        self.on_event("logged_out", {})
+
+    async def create_group(self, members: list[str]) -> str:
+        """邀请在线用户建群，返回新房间名。"""
         assert self.conn is not None
+        reply = await self.conn.create_group(members)
+        room = reply["data"]["room"]
+        self.on_event("group_created", {"room": room, "owner": self.nickname,
+                                        "members": members + [self.nickname or ""]})
+        return room
+
+    async def delete_group(self, room: str) -> None:
+        assert self.conn is not None
+        await self.conn.delete_group(room)
+
+    async def refresh_rooms(self) -> None:
+        if self.conn is None or self._closed:
+            return
         reply = await self.conn.list_rooms()
         self.rooms = reply["data"]["rooms"]
         self.on_event("room_list", {"rooms": self.rooms})
 
     async def join_room(self, room: str) -> dict:
-        assert self.conn is not None
+        if self.conn is None:
+            raise RuntimeError("尚未连接服务器")
         reply = await self.conn.join_room(room)
         self.room = room
         self.role = reply["data"].get("role", "player")
@@ -111,11 +150,13 @@ class ClientSession:
         self.on_event("left", {"room": self.room})
 
     async def say(self, text: str) -> None:
-        assert self.conn is not None
+        if self.conn is None:
+            raise RuntimeError("尚未连接服务器")
         await self.conn.room_msg(text)
 
     async def whisper(self, to: str, text: str) -> None:
-        assert self.conn is not None
+        if self.conn is None:
+            raise RuntimeError("尚未连接服务器")
         await self.conn.private_msg(to, text)
         # 服务端给发送者的回执走的是"请求-响应"通道（不会被 _handle 处理），
         # 所以这里补一行本地记录，保证自己也能在记录里看到发出去的私信。
@@ -169,6 +210,15 @@ class ClientSession:
                 self.room_users = list(data.get("users", []))
         elif kind == "joined":
             self.role = data.get("role", self.role)
+        elif kind == "group_created":
+            room = data.get("room")
+            self.room = room
+            self.role = "player"
+            line = f"[群聊] {data.get('owner')} 创建了 {room}，成员：{'、'.join(data.get('members') or [])}"
+        elif kind == "group_deleted":
+            line = f"[群聊] {data.get('owner')} 解散了 {data.get('room')}"
+        elif kind == "logged_out":
+            line = "[账号] 已登出"
         elif kind in ("game_start", "hand"):
             self.hand = [parse_card(code) for code in data.get("hand", [])]
             label = "发牌" if kind == "game_start" else "拿到底牌"

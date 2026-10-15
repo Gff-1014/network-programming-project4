@@ -264,6 +264,7 @@ class Session:
             {
                 "conn_id": self.conn_id,
                 "nickname": self.nickname,
+                "account": self.nickname,
                 "token": self.token,
                 "room": self.room,
                 "rooms": self.hub.room_list(),
@@ -280,6 +281,7 @@ class Session:
             {
                 "conn_id": self.conn_id,
                 "nickname": self.nickname,
+                "account": self.nickname,
                 "token": self.token,
                 "room": self.room,
                 "users": room.nicknames() if room else [],

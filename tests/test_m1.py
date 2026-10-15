@@ -167,7 +167,7 @@ async def test_nickname_reserved_during_grace(server):
     other = await Connection.connect(server.host, server.port)
     with pytest.raises(ServerError) as exc:
         await other.login("holder")
-    assert exc.value.code == ErrCode.NICKNAME_TAKEN
+    assert exc.value.code == ErrCode.ACCOUNT_LOGGED_IN
     assert "重连" in exc.value.message
     await other.close()
 

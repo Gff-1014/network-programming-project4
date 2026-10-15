@@ -51,7 +51,9 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
 
         self.host_var = tk.StringVar(value=host)
         self.port_var = tk.StringVar(value=str(port))
-        self.nick_var = tk.StringVar(value="")
+        self.account_var = tk.StringVar(value="")
+        self.password_var = tk.StringVar(value="123456")
+        self.nick_var = self.account_var          # 兼容旧引用
         self.status_var = tk.StringVar(value="未连接")
         self.chat_var = tk.StringVar(value="")
         self.table_status_var = tk.StringVar(value="")
@@ -164,6 +166,16 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
                 self.show("room")
         elif kind == "left":
             self.show("lobby")
+        elif kind == "logged_out":
+            self.status_var.set("已登出")
+            self.chat_var.set("")
+            self.show("connect")
+        elif kind == "group_created":
+            self.status_var.set(f"已进入群聊 {data.get('room')}")
+            self.show("room")
+        elif kind == "group_deleted":
+            self.status_var.set(f"群聊 {data.get('room')} 已解散")
+            self.show("lobby")
         elif kind == "disconnected":
             self.status_var.set("连接已断开")
             messagebox.showwarning("连接断开", "与服务器的连接已断开")
@@ -211,17 +223,27 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
     # ------------------------------------------------------------ 动作封装 ----
 
     def do_login(self) -> None:
-        host, port, nick = self.host_var.get().strip(), self.port_var.get().strip(), self.nick_var.get().strip()
-        if not nick:
-            messagebox.showinfo("提示", "请输入昵称")
+        host, port = self.host_var.get().strip(), self.port_var.get().strip()
+        account, password = self.account_var.get().strip(), self.password_var.get()
+        if not account:
+            messagebox.showinfo("提示", "请输入账号")
+            return
+        if not password:
+            messagebox.showinfo("提示", "请输入密码")
             return
 
         async def run() -> None:
             await self.session.connect(host, int(port))
-            await self.session.login(nick)
+            await self.session.login(account, password)
 
         self.status_var.set("正在连接…")
-        self.call(run(), "连接失败")
+        self.call(run(), "登录失败")
+
+    def do_logout(self) -> None:
+        """登出账号：服务端释放账号，客户端回到登录页。"""
+        if not messagebox.askyesno("登出", f"确定要登出账号 {self.session.account or ''} 吗？"):
+            return
+        self.call(self.session.logout(), "登出失败")
 
     def do_join(self, room: str) -> None:
         async def run() -> None:
@@ -246,12 +268,35 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
         self.call(self.session.say(text), "发送失败")
 
     def do_whisper(self, to: str) -> None:
-        text = self.chat_var.get().strip()
-        if not text or not to:
-            messagebox.showinfo("提示", "先在右侧选择一位用户，再输入私信内容")
+        """给某位在线用户发私信（弹窗输入内容）。"""
+        from .dialogs import ask_text
+
+        if not to:
+            messagebox.showinfo("提示", "请先选择一位在线用户")
             return
-        self.chat_var.set("")
-        self.call(self.session.whisper(to, text), "私信失败")
+        text = ask_text(self, f"私信 {to}", f"发给 {to}：", use_ctk=UI_CTK_ENABLED)
+        if text:
+            self.call(self.session.whisper(to, text), "私信失败")
+
+    def do_create_group(self) -> None:
+        """邀请在线用户创建群聊。"""
+        from .dialogs import choose_members
+
+        candidates = [name for name in self.session.room_users
+                      if name != self.session.nickname]
+        if not candidates:
+            messagebox.showinfo("提示", "当前房间里没有其他在线用户")
+            return
+        picked = choose_members(self, candidates, use_ctk=UI_CTK_ENABLED)
+        if picked:
+            self.call(self.session.create_group(picked), "创建群聊失败")
+
+    def do_delete_group(self) -> None:
+        """解散当前群聊（仅群主）。"""
+        room = self.session.room or ""
+        if not messagebox.askyesno("解散群聊", f"确定要解散 {room} 吗？所有成员会回到大厅。"):
+            return
+        self.call(self.session.delete_group(room), "解散群聊失败")
 
     def do_ready(self) -> None:
         if self.session.role != "player":
@@ -312,25 +357,46 @@ class BaseFrame(ttk.Frame):
 class ConnectFrame(BaseFrame):
     def __init__(self, parent, app: ChatApp) -> None:
         super().__init__(parent, app)
-        box = ttk.LabelFrame(self, text="连接服务器", padding=16)
+        box = ttk.LabelFrame(self, text="登录", padding=16)
         box.place(relx=0.5, rely=0.45, anchor="center")
 
-        ttk.Label(box, text="服务器地址", font=FONT_UI).grid(row=0, column=0, sticky="e", pady=6)
-        ttk.Entry(box, textvariable=app.host_var, width=18).grid(row=0, column=1)
-        ttk.Label(box, text="端口", font=FONT_UI).grid(row=0, column=2, padx=(12, 4))
-        ttk.Entry(box, textvariable=app.port_var, width=8).grid(row=0, column=3)
-        ttk.Label(box, text="昵称", font=FONT_UI).grid(row=1, column=0, sticky="e", pady=6)
-        ttk.Entry(box, textvariable=app.nick_var, width=18).grid(row=1, column=1, columnspan=3, sticky="w")
-        ttk.Button(box, text="连接", command=app.do_login).grid(row=2, column=0, columnspan=4, pady=(12, 0))
-        ttk.Label(box, text="昵称重复、房间不存在等情况会在这里给出原因", font=FONT_LOG).grid(
-            row=3, column=0, columnspan=4, pady=(10, 0)
-        )
+        ttk.Label(box, text="账号", font=FONT_UI).grid(row=0, column=0, sticky="e", pady=6)
+        account_entry = ttk.Entry(box, textvariable=app.account_var, width=22)
+        account_entry.grid(row=0, column=1, sticky="w")
+        ttk.Label(box, text="密码", font=FONT_UI).grid(row=1, column=0, sticky="e", pady=6)
+        pwd_entry = ttk.Entry(box, textvariable=app.password_var, width=22, show="*")
+        pwd_entry.grid(row=1, column=1, sticky="w")
+        ttk.Button(box, text="登录", command=app.do_login).grid(row=2, column=0, columnspan=2,
+                                                               pady=(12, 0), sticky="ew")
+        hint = ttk.Label(box, text="预置账号 wanjia1 ~ wanjia5，初始密码 123456", font=FONT_LOG)
+        hint.grid(row=3, column=0, columnspan=2, pady=(10, 0))
+        self.hint = hint
+        app.password_entry = pwd_entry
+        account_entry.focus_set()
+        account_entry.bind("<Return>", lambda _event: pwd_entry.focus_set())
+        pwd_entry.bind("<Return>", lambda _event: app.do_login())
+
+    def on_event(self, kind: str, data: dict) -> None:
+        if kind == "error":
+            self.hint.configure(
+                text=f"{data.get('message')}（{data.get('code')}）",
+                foreground="#C0392B",
+            )
+        elif kind == "logged_out":
+            self.hint.configure(text="已登出，可换账号登录", foreground="#2E7D32")
+            self.app.account_var.set("")
+            self.app.password_var.set("")
 
 
 class LobbyFrame(BaseFrame):
     def __init__(self, parent, app: ChatApp) -> None:
         super().__init__(parent, app)
-        ttk.Label(self, text="大厅", font=FONT_TITLE).pack(anchor="w")
+        header = ttk.Frame(self)
+        header.pack(fill="x")
+        ttk.Label(header, text="大厅", font=FONT_TITLE).pack(side="left")
+        self.account_var_display = tk.StringVar(value="当前账号：-")
+        ttk.Label(header, textvariable=self.account_var_display, font=FONT_UI).pack(side="left", padx=16)
+        ttk.Button(header, text="登出账号", command=app.do_logout).pack(side="right")
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, pady=8)
@@ -342,12 +408,23 @@ class LobbyFrame(BaseFrame):
         ttk.Button(left, text="进入选中房间", command=self._join_selected).pack(fill="x", pady=(8, 0))
         ttk.Button(left, text="刷新", command=self._refresh).pack(fill="x", pady=4)
 
-        right = ttk.LabelFrame(body, text="在线用户", padding=8)
+        right = ttk.LabelFrame(body, text="在线用户（双击私聊）", padding=8)
         right.pack(side="left", fill="both", expand=True, padx=(8, 0))
         self.user_list = tk.Listbox(right, font=FONT_UI, height=12)
         self.user_list.pack(fill="both", expand=True)
+        self.user_list.bind("<Double-Button-1>", lambda _event: self._whisper_selected())
+        ttk.Button(right, text="私聊选中用户", command=self._whisper_selected).pack(fill="x", pady=(8, 0))
+        ttk.Button(right, text="邀请建群", command=app.do_create_group).pack(fill="x", pady=4)
+
+    def _whisper_selected(self) -> None:
+        selection = self.user_list.curselection()
+        if not selection:
+            messagebox.showinfo("提示", "请先选中一位在线用户")
+            return
+        self.app.do_whisper(self.user_list.get(selection[0]))
 
     def on_show(self) -> None:
+        self.account_var_display.set(f"当前账号：{self.app.session.account or '-'}")
         self._refresh()
 
     def _refresh(self) -> None:
@@ -365,9 +442,8 @@ class LobbyFrame(BaseFrame):
         if kind == "room_list":
             self.room_list.delete(0, tk.END)
             for room in data.get("rooms", []):
-                kind_label = {"lobby": "大厅", "chat": "聊天", "doudizhu": "牌桌"}.get(
-                    room.get("kind"), room.get("kind")
-                )
+                kind_label = {"lobby": "大厅", "chat": "聊天", "doudizhu": "牌桌",
+                              "group": "群聊"}.get(room.get("kind"), room.get("kind"))
                 self.room_list.insert(tk.END, f"{room['name']}（{kind_label}・{room['count']} 人）")
         elif kind == "room_users":
             if data.get("room") == self.app.session.room:
@@ -383,7 +459,10 @@ class RoomFrame(BaseFrame):
         header.pack(fill="x")
         self.title_var = tk.StringVar(value="聊天房")
         ttk.Label(header, textvariable=self.title_var, font=FONT_TITLE).pack(side="left")
+        self.group_var = tk.StringVar(value="")
+        ttk.Label(header, textvariable=self.group_var, font=FONT_UI).pack(side="left", padx=12)
         ttk.Button(header, text="离开房间", command=app.do_leave).pack(side="right")
+        self.btn_dismiss = ttk.Button(header, text="解散群聊", command=app.do_delete_group)
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, pady=8)
@@ -409,7 +488,24 @@ class RoomFrame(BaseFrame):
 
     def on_show(self) -> None:
         self.title_var.set(f"聊天房 - {self.app.session.room}")
+        self._sync_group_controls()
         self.refresh_users()
+
+    def _sync_group_controls(self) -> None:
+        """群聊：显示群主；只有群主能看到"解散群聊"。"""
+        session = self.app.session
+        room = next((r for r in session.rooms if r.get("name") == session.room), None)
+        is_group = bool(room and room.get("kind") == "group")
+        if is_group:
+            owner = room.get("owner") or "-"
+            self.group_var.set(f"群聊（群主：{owner}）")
+            if owner == session.nickname:
+                self.btn_dismiss.pack(side="right", padx=(0, 8))
+            else:
+                self.btn_dismiss.pack_forget()
+        else:
+            self.group_var.set("")
+            self.btn_dismiss.pack_forget()
 
     def refresh_users(self) -> None:
         self.user_list.delete(0, tk.END)
@@ -419,6 +515,8 @@ class RoomFrame(BaseFrame):
     def on_event(self, kind: str, data: dict) -> None:
         if kind == "room_users" and data.get("room") == self.app.session.room:
             self.refresh_users()
+        if kind in ("room_list", "joined", "group_created"):
+            self._sync_group_controls()
         self.append_log(data.get("_line", ""))
 
     def append_log(self, text: str) -> None:

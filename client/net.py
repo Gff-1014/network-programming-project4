@@ -161,8 +161,19 @@ class Connection:
 
     # ------------------------------------------------------------- 语义封装 ----
 
-    async def login(self, nickname: str, timeout: float = 5.0) -> dict:
-        return await self.request("login", {"nickname": nickname}, timeout)
+    async def login(self, account: str, password: str = "123456",
+                    timeout: float = 5.0) -> dict:
+        """账号 + 密码登录（未预置的账号在服务端 auto_register 打开时首次登录即注册）。"""
+        return await self.request("login", {"account": account, "password": password}, timeout)
+
+    async def logout(self, timeout: float = 3.0) -> dict:
+        return await self.request("logout", {}, timeout)
+
+    async def create_group(self, members: list[str], timeout: float = 5.0) -> dict:
+        return await self.request("create_group", {"members": members}, timeout)
+
+    async def delete_group(self, room: str, timeout: float = 5.0) -> dict:
+        return await self.request("delete_group", {"room": room}, timeout)
 
     async def resume(self, token: str, timeout: float = 5.0) -> dict:
         return await self.request("resume", {"token": token}, timeout)

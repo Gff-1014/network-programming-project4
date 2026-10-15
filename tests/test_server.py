@@ -22,13 +22,14 @@ async def test_login_and_welcome(server):
     await conn.close()
 
 
-async def test_duplicate_nickname_rejected(server):
+async def test_duplicate_account_rejected(server):
+    """同一账号不能在两个客户端同时登录。"""
     first = await Connection.connect(server.host, server.port)
     await first.login("dup")
     second = await Connection.connect(server.host, server.port)
     with pytest.raises(ServerError) as exc:
         await second.login("dup")
-    assert exc.value.code == ErrCode.NICKNAME_TAKEN
+    assert exc.value.code == ErrCode.ACCOUNT_LOGGED_IN
     await first.close()
     await second.close()
 
