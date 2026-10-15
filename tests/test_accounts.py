@@ -62,8 +62,9 @@ async def test_logout_frees_account(server):
     await second.close()
 
 
-async def test_auto_registered_account_keeps_its_password(server):
+async def test_auto_registered_account_keeps_its_password(server_factory):
     """未预置账号首次登录即注册；之后密码必须一致。"""
+    server = await server_factory(auto_register=True)
     conn = await Connection.connect(server.host, server.port)
     await conn.login("newbie", "mypass")
     await conn.request("logout", {})
@@ -76,6 +77,32 @@ async def test_auto_registered_account_keeps_its_password(server):
     welcome = await again.login("newbie", "mypass")
     assert welcome["data"]["account"] == "newbie"
     await again.close()
+
+
+async def test_unknown_account_is_rejected_by_default(server_factory):
+    """默认严格模式：拼错的账号会被拒绝，并提示最接近的正确账号。"""
+    server = await server_factory(auto_register=False)
+    conn = await Connection.connect(server.host, server.port)
+    with pytest.raises(ServerError) as exc:
+        await conn.login("wajia1", PASSWORD)      # 少了一个 n
+    assert exc.value.code == ErrCode.UNKNOWN_ACCOUNT
+    assert "wanjia1" in exc.value.message, "应提示最接近的正确账号"
+    await conn.close()
+
+
+async def test_list_users_returns_online_accounts(server):
+    conn = await Connection.connect(server.host, server.port)
+    await conn.login("wanjia1", PASSWORD)
+    other = await Connection.connect(server.host, server.port)
+    await other.login("wanjia2", PASSWORD)
+    await other.join_room("聊天房")
+
+    reply = await conn.request("list_users", {})
+    data = reply["data"]
+    assert set(data["online"]) == {"wanjia1", "wanjia2"}, "在线玩家应包含全部在线账号"
+    assert data["users"] == ["wanjia1"], "本房间成员只含同房间的人"
+    await conn.close()
+    await other.close()
 
 
 async def test_strict_mode_rejects_unknown_account(server_factory):

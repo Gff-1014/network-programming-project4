@@ -26,6 +26,7 @@ class ClientSession:
         self.role: str | None = None
         self.rooms: list[dict] = []
         self.room_users: list[str] = []
+        self.online_users: list[str] = []
         self.hand: list[int] = []
         self.table: dict[str, Any] = {}
         self.auto_play = False
@@ -122,6 +123,16 @@ class ClientSession:
         self.rooms = reply["data"]["rooms"]
         self.on_event("room_list", {"rooms": self.rooms})
 
+    async def refresh_users(self) -> None:
+        """刷新在线玩家（全服在线 + 本房间成员）。"""
+        if self.conn is None or self._closed:
+            return
+        reply = await self.conn.list_users()
+        data = reply["data"]
+        self.room_users = list(data.get("users") or [])
+        self.online_users = list(data.get("online") or [])
+        self.on_event("user_list", data)
+
     async def join_room(self, room: str) -> dict:
         if self.conn is None:
             raise RuntimeError("尚未连接服务器")
@@ -208,6 +219,9 @@ class ClientSession:
         elif kind == "room_users":
             if data.get("room") == self.room:
                 self.room_users = list(data.get("users", []))
+        elif kind == "user_list":
+            self.room_users = list(data.get("users") or [])
+            self.online_users = list(data.get("online") or [])
         elif kind == "joined":
             self.role = data.get("role", self.role)
         elif kind == "group_created":

@@ -282,14 +282,19 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
         """邀请在线用户创建群聊。"""
         from .dialogs import choose_members
 
-        candidates = [name for name in self.session.room_users
+        source = self.session.online_users or self.session.room_users
+        candidates = [name for name in source
                       if name != self.session.nickname]
         if not candidates:
-            messagebox.showinfo("提示", "当前房间里没有其他在线用户")
+            messagebox.showinfo("提示", "当前没有其他在线玩家")
             return
         picked = choose_members(self, candidates, use_ctk=UI_CTK_ENABLED)
         if picked:
             self.call(self.session.create_group(picked), "创建群聊失败")
+
+    def do_refresh_users(self) -> None:
+        """手动刷新在线玩家（广播偶尔会错过，留一个手动入口）。"""
+        self.call(self.session.refresh_users(), "刷新在线玩家失败")
 
     def do_delete_group(self) -> None:
         """解散当前群聊（仅群主）。"""
@@ -408,13 +413,14 @@ class LobbyFrame(BaseFrame):
         ttk.Button(left, text="进入选中房间", command=self._join_selected).pack(fill="x", pady=(8, 0))
         ttk.Button(left, text="刷新", command=self._refresh).pack(fill="x", pady=4)
 
-        right = ttk.LabelFrame(body, text="在线用户（双击私聊）", padding=8)
+        right = ttk.LabelFrame(body, text="在线玩家（点一下即可私聊）", padding=8)
         right.pack(side="left", fill="both", expand=True, padx=(8, 0))
         self.user_list = tk.Listbox(right, font=FONT_UI, height=12)
         self.user_list.pack(fill="both", expand=True)
         self.user_list.bind("<Double-Button-1>", lambda _event: self._whisper_selected())
         ttk.Button(right, text="私聊选中用户", command=self._whisper_selected).pack(fill="x", pady=(8, 0))
         ttk.Button(right, text="邀请建群", command=app.do_create_group).pack(fill="x", pady=4)
+        ttk.Button(right, text="刷新在线玩家", command=app.do_refresh_users).pack(fill="x", pady=4)
 
     def _whisper_selected(self) -> None:
         selection = self.user_list.curselection()
@@ -426,6 +432,7 @@ class LobbyFrame(BaseFrame):
     def on_show(self) -> None:
         self.account_var_display.set(f"当前账号：{self.app.session.account or '-'}")
         self._refresh()
+        self.app.call(self.app.session.refresh_users(), "刷新在线玩家失败")
 
     def _refresh(self) -> None:
         self.app.call(self.app.session.refresh_rooms(), "刷新房间失败")
@@ -447,9 +454,17 @@ class LobbyFrame(BaseFrame):
                 self.room_list.insert(tk.END, f"{room['name']}（{kind_label}・{room['count']} 人）")
         elif kind == "room_users":
             if data.get("room") == self.app.session.room:
-                self.user_list.delete(0, tk.END)
-                for user in data.get("users", []):
-                    self.user_list.insert(tk.END, user)
+                self._render_users()
+        elif kind == "user_list":
+            self._render_users()
+
+    def _render_users(self) -> None:
+        """在线玩家 = 全服在线（拿不到时退回本房间成员）。"""
+        names = self.app.session.online_users or self.app.session.room_users
+        self.user_list.delete(0, tk.END)
+        for name in names:
+            label = f"{name}（我）" if name == self.app.session.nickname else name
+            self.user_list.insert(tk.END, label)
 
 
 class RoomFrame(BaseFrame):

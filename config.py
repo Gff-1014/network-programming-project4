@@ -16,6 +16,20 @@ def _env_str(name: str, default: str) -> str:
     return default if raw is None or raw == "" else raw
 
 
+def _env_accounts(name: str) -> dict[str, str]:
+    """解析 `DDZ_EXTRA_ACCOUNTS="bot0:pw,bot1:pw"` 这样的额外账号表。"""
+    raw = os.environ.get(name, "")
+    accounts: dict[str, str] = {}
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        account, _, password = item.partition(":")
+        if account.strip():
+            accounts[account.strip()] = password.strip() or "123456"
+    return accounts
+
+
 @dataclass(frozen=True)
 class Settings:
     # 服务端监听：本机实验用 127.0.0.1，跨机时改为 0.0.0.0 并放行防火墙
@@ -49,8 +63,10 @@ class Settings:
     max_nickname_chars: int = _env_int("DDZ_MAX_NICKNAME_CHARS", 32)
 
     # 账号体系（课程演示）：预置 5 个账号，密码统一 123456。
-    # 未预置的账号在首次登录时自动注册（否则压测机器人 / AI 陪打没有身份可用）；
-    # 想只允许这 5 个账号，设 DDZ_AUTO_REGISTER=0。
+    # 默认**严格模式**：只有预置账号与额外账号能登录（拼错账号会被拒绝并给出提示）。
+    # 需要更多身份（压测 10 客户端等）时用 DDZ_EXTRA_ACCOUNTS="bot0:pw,bot1:pw" 批量注入；
+    # 也可以临时打开 DDZ_AUTO_REGISTER=1，让未预置账号首次登录即注册。
+    extra_accounts: dict[str, str] = field(default_factory=lambda: _env_accounts("DDZ_EXTRA_ACCOUNTS"))
     account_passwords: dict[str, str] = field(default_factory=lambda: {
         "wanjia1": "123456",
         "wanjia2": "123456",
@@ -58,7 +74,12 @@ class Settings:
         "wanjia4": "123456",
         "wanjia5": "123456",
     })
-    auto_register: bool = _env_int("DDZ_AUTO_REGISTER", 1) == 1
+    auto_register: bool = _env_int("DDZ_AUTO_REGISTER", 0) == 1
+
+    def __post_init__(self) -> None:
+        # 额外账号并入账号表（不覆盖预置账号的密码）
+        for account, password in self.extra_accounts.items():
+            self.account_passwords.setdefault(account, password)
 
     # 默认房间：大厅是登录后自动进入的房间，不可退出
     lobby_room: str = _env_str("DDZ_LOBBY_ROOM", "大厅")

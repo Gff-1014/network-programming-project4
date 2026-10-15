@@ -33,6 +33,9 @@ async def server_factory():
     sweepers: list[asyncio.Task] = []
 
     async def start(**overrides) -> ServerHandle:
+        # 测试里用到的账号名很多，默认打开"首次登录即注册"，
+        # 生产/演示默认是严格模式（只认预置账号 + DDZ_EXTRA_ACCOUNTS）。
+        overrides.setdefault("auto_register", True)
         cfg = dataclasses.replace(settings, **overrides)
         hub = Hub(cfg)
         srv = await asyncio.start_server(

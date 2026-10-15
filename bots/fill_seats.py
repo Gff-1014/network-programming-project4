@@ -49,10 +49,12 @@ async def main() -> int:
     parser.add_argument("--port", type=int, default=9011)
     parser.add_argument("--room", default="牌桌2")
     parser.add_argument("--ai", type=int, default=2, help="占几个座位（最多 3；留给你自己的那 1 个不用填）")
-    parser.add_argument("--prefix", default="AI")
+    parser.add_argument("--accounts", default="wanjia4,wanjia5",
+                        help="AI 使用哪些账号（默认取预置账号 wanjia4/wanjia5；严格模式下必须是已存在的账号）")
+    parser.add_argument("--password", default="123456")
     args = parser.parse_args()
 
-    suffix = "".join(random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(3))
+    accounts = [a.strip() for a in args.accounts.split(",") if a.strip()]
     bots: list[DoudizhuBot] = []
     conns: list[Connection] = []
     tasks: list[asyncio.Task] = []
@@ -60,8 +62,8 @@ async def main() -> int:
 
     for index in range(args.ai):
         conn = await Connection.connect(args.host, args.port)
-        nickname = f"{args.prefix}{index + 1}-{suffix}"
-        await conn.login(nickname)
+        nickname = accounts[index % len(accounts)] if accounts else f"ai{index + 1}"
+        await conn.login(nickname, args.password)
         bot = DoudizhuBot(nickname, conn, args.room)
         conns.append(conn)
         bots.append(bot)

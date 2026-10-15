@@ -102,6 +102,17 @@ async def on_list_rooms(session, data: dict, request_id: str | None) -> None:
     session.send(make("room_list", {"rooms": session.hub.room_list()}, request_id))
 
 
+@register("list_users")
+async def on_list_users(session, data: dict, request_id: str | None) -> None:
+    """拉取在线玩家：既有本房间成员，也有全服在线账号（大厅的"刷新在线玩家"用）。"""
+    room = session.hub.room_of(session)
+    session.send(make("user_list", {
+        "room": session.room,
+        "users": room.nicknames() if room else [],
+        "online": session.hub.online_accounts(),
+    }, request_id))
+
+
 @register("join_room")
 async def on_join_room(session, data: dict, request_id: str | None) -> None:
     if not _require_login(session):

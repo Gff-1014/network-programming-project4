@@ -199,6 +199,9 @@ class LobbyFrame(ctk.CTkFrame):
         self.users_box.configure(scrollbar_button_color=CARD_BG_2,
                                  scrollbar_button_hover_color=ACCENT_HOVER)
         self.users_box.pack(fill="both", expand=True, padx=6, pady=(0, 12))
+        ctk.CTkButton(right, text="刷新在线玩家", width=110, fg_color=CARD_BG_2,
+                      hover_color="#3A3A3A", command=self.app.do_refresh_users).pack(
+            anchor="w", padx=12, pady=(0, 12))
 
     # ---------- 事件 ----------
 
@@ -206,6 +209,7 @@ class LobbyFrame(ctk.CTkFrame):
         self._refresh()
         self._render_users()
         self.account_label.configure(text=f"当前账号：{self.app.session.account or '-'}")
+        self.app.call(self.app.session.refresh_users(), "刷新在线玩家失败")
 
     def _refresh(self) -> None:
         self.app.call(self.app.session.refresh_rooms(), "刷新房间失败")
@@ -226,7 +230,8 @@ class LobbyFrame(ctk.CTkFrame):
     def _render_users(self) -> None:
         for child in self.users_box.winfo_children():
             child.destroy()
-        names = self.app.session.room_users or [self.app.session.nickname or "-"]
+        names = (self.app.session.online_users or self.app.session.room_users
+                 or [self.app.session.nickname or "-"])
         for name in names:
             if name == self.app.session.nickname:
                 ctk.CTkLabel(self.users_box, text=f"　{name}（我）", anchor="w",
@@ -241,6 +246,8 @@ class LobbyFrame(ctk.CTkFrame):
             self._render_rooms(data.get("rooms", []))
             self.account_label.configure(text=f"当前账号：{self.app.session.account or '-'}")
         elif kind == "room_users":
+            self._render_users()
+        elif kind == "user_list":
             self._render_users()
 
 

@@ -187,6 +187,9 @@ class Connection:
     async def list_rooms(self, timeout: float = 5.0) -> dict:
         return await self.request("list_rooms", {}, timeout)
 
+    async def list_users(self, timeout: float = 5.0) -> dict:
+        return await self.request("list_users", {}, timeout)
+
     async def room_msg(self, text: str, timeout: float = 5.0) -> dict:
         return await self.request("room_msg", {"text": text}, timeout)
 

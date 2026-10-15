@@ -18,6 +18,30 @@ from typing import TYPE_CHECKING
 from .protocol import ErrCode, error, make, now_ms
 from .table import Table
 
+
+def _edit_distance(a: str, b: str) -> int:
+    """简易编辑距离，只用来判断"是否只差一个字符"。"""
+    if a == b:
+        return 0
+    if abs(len(a) - len(b)) > 1:
+        return 2
+    if len(a) > len(b):
+        a, b = b, a
+    if len(a) == len(b):
+        return sum(1 for x, y in zip(a, b) if x != y)
+    i = j = 0
+    skipped = False
+    while i < len(a) and j < len(b):
+        if a[i] != b[j]:
+            if skipped:
+                return 2
+            skipped = True
+            j += 1
+            continue
+        i += 1
+        j += 1
+    return 1
+
 if TYPE_CHECKING:  # pragma: no cover
     from .session import Session
 
@@ -121,7 +145,10 @@ class Hub:
         expected = self.cfg.account_passwords.get(account)
         if expected is None:
             if not self.cfg.auto_register:
-                return False, ErrCode.UNKNOWN_ACCOUNT, "账号不存在"
+                # 拼错一两个字母是最常见的登录失败原因，直接给出候选
+                near = self._near_account(account)
+                hint = f"，是不是想输入 {near}？" if near else ""
+                return False, ErrCode.UNKNOWN_ACCOUNT, f"账号不存在{hint}"
             self.cfg.account_passwords[account] = password   # 首次登录即注册
         elif password != expected:
             return False, ErrCode.BAD_CREDENTIALS, "账号或密码不正确"
@@ -136,6 +163,21 @@ class Hub:
         self.by_nickname[account] = session
         self._enter_room(session, self.cfg.lobby_room)
         return True, None, None
+
+    def _near_account(self, account: str) -> str | None:
+        """在账号表里找一个"像打错了"的候选（大小写不同或差一个字符）。"""
+        lowered = account.lower()
+        for known in self.cfg.account_passwords:
+            if known.lower() == lowered:
+                return known
+        for known in self.cfg.account_passwords:
+            if _edit_distance(known.lower(), lowered) <= 1:
+                return known
+        return None
+
+    def online_accounts(self) -> list[str]:
+        """当前所有在线账号（不区分房间）。"""
+        return sorted(self.by_nickname)
 
     def resume(self, session: "Session", token: str) -> tuple[bool, str | None, str | None]:
         """凭 token 恢复会话：昵称、房间一并恢复，并换发新 token。"""

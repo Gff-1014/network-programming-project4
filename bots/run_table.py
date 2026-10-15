@@ -29,20 +29,22 @@ async def main() -> int:
     parser.add_argument("--port", type=int, default=9011)
     parser.add_argument("--room", default="牌桌1")
     parser.add_argument("--spectators", type=int, default=0)
+    parser.add_argument("--password", default="123456")
     args = parser.parse_args()
 
-    suffix = "".join(random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(4))
-    names = [f"dz{i}-{suffix}" for i in range(3)]
+    # 严格模式（默认）下只能用已存在的账号，这里取预置账号的后三个
+    names = ["wanjia3", "wanjia4", "wanjia5"]
+    password = args.password
 
     conns = [await Connection.connect(args.host, args.port) for _ in range(3)]
     for conn, name in zip(conns, names):
-        await conn.login(name)
+        await conn.login(name, password)
     bots = [DoudizhuBot(name, conn, args.room) for name, conn in zip(names, conns)]
 
     spectators = []
     for index in range(args.spectators):
         conn = await Connection.connect(args.host, args.port)
-        await conn.login(f"watch{index}-{suffix}")
+        await conn.login(f"wanjia{index + 1}", password)
         spectators.append(conn)
 
     try:
