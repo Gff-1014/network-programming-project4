@@ -13,7 +13,9 @@ from typing import Any, Coroutine
 
 
 class AsyncBridge:
+    """后台线程里的 asyncio 事件循环，供 Tk 主线程提交协程。"""
     def __init__(self) -> None:
+        """启动后台线程与事件循环，并等待其就绪。"""
         self.loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, name="async-bridge", daemon=True)
@@ -21,6 +23,7 @@ class AsyncBridge:
         self._ready.wait(3)
 
     def _run(self) -> None:
+        """线程入口：设置事件循环并 run_forever。"""
         asyncio.set_event_loop(self.loop)
         self.loop.call_soon(self._ready.set)
         self.loop.run_forever()
@@ -30,4 +33,5 @@ class AsyncBridge:
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
 
     def stop(self) -> None:
+        """请求后台循环停止。"""
         self.loop.call_soon_threadsafe(self.loop.stop)

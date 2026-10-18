@@ -9,6 +9,7 @@ from .protocol import ErrCode, error, make, now_ms, register
 
 
 def _require_login(session) -> bool:
+    """未登录时回错误并返回 False，供各处理器统一复用。"""
     if session.nickname is None:
         session.send(error(ErrCode.NOT_LOGGED_IN, "请先登录"))
         return False
@@ -16,6 +17,7 @@ def _require_login(session) -> bool:
 
 
 def _text(data: dict, key: str = "text") -> str:
+    """取并裁剪字符串字段，缺省返回空串。"""
     value = data.get(key)
     return value.strip() if isinstance(value, str) else ""
 
@@ -27,12 +29,14 @@ def _action_error(session, action, request_id: str | None) -> None:
 
 
 def _table_of(session):
+    """取会话所在牌桌；不在牌桌返回 None。"""
     room = session.hub.room_of(session)
     return room.table if room is not None else None
 
 
 @register("login")
 async def on_login(session, data: dict, request_id: str | None) -> None:
+    """登录：账号密码交给 Hub 校验，成功后下发 welcome 并广播在线变化。"""
     if session.nickname is not None:
         session.send(error(ErrCode.BAD_MESSAGE, "你已经登录", request_id))
         return
@@ -79,6 +83,7 @@ async def on_register(session, data: dict, request_id: str | None) -> None:
 
 @register("list_conversations")
 async def on_list_conversations(session, data: dict, request_id: str | None) -> None:
+    """返回当前账号的私信会话摘要。"""
     if not _require_login(session):
         return
     session.send(make("conversations",
@@ -102,6 +107,7 @@ async def on_get_history(session, data: dict, request_id: str | None) -> None:
 
 @register("logout")
 async def on_logout(session, data: dict, request_id: str | None) -> None:
+    """主动登出：先回执再断开（主动退出不保留重连预约）。"""
     session.send(make("left", {"reason": "logout"}, request_id))
     await session.close("logout", keep_reservation=False)
 
@@ -136,11 +142,13 @@ async def on_pong(session, data: dict, request_id: str | None) -> None:
 
 @register("ping")
 async def on_ping(session, data: dict, request_id: str | None) -> None:
+    """应用层心跳：回 pong 并带回 echo。"""
     session.send(make("pong", {"echo": data.get("echo")}, request_id))
 
 
 @register("list_rooms")
 async def on_list_rooms(session, data: dict, request_id: str | None) -> None:
+    """返回房间列表。"""
     session.send(make("room_list", {"rooms": session.hub.room_list()}, request_id))
 
 
@@ -157,6 +165,7 @@ async def on_list_users(session, data: dict, request_id: str | None) -> None:
 
 @register("join_room")
 async def on_join_room(session, data: dict, request_id: str | None) -> None:
+    """加入房间：牌桌先做容量检查，再把角色（player/spectator）回给客户端。"""
     if not _require_login(session):
         return
     room_name = data.get("room")
@@ -189,6 +198,7 @@ async def on_join_room(session, data: dict, request_id: str | None) -> None:
 
 @register("leave_room")
 async def on_leave_room(session, data: dict, request_id: str | None) -> None:
+    """离开当前房间，回到大厅。"""
     if not _require_login(session):
         return
     previous = session.room
@@ -238,6 +248,7 @@ async def on_delete_group(session, data: dict, request_id: str | None) -> None:
 
 @register("room_msg")
 async def on_room_msg(session, data: dict, request_id: str | None) -> None:
+    """房间聊天：广播给房间成员并给发送者回执。"""
     if not _require_login(session):
         return
     text = _text(data)
@@ -272,6 +283,7 @@ async def on_room_msg(session, data: dict, request_id: str | None) -> None:
 
 @register("private_msg")
 async def on_private_msg(session, data: dict, request_id: str | None) -> None:
+    """私信：投递给目标并记录到会话历史。"""
     if not _require_login(session):
         return
     target = data.get("to")
@@ -305,6 +317,7 @@ async def on_private_msg(session, data: dict, request_id: str | None) -> None:
 
 @register("room_ready")
 async def on_room_ready(session, data: dict, request_id: str | None) -> None:
+    """牌桌准备：三人齐且都准备时开局。"""
     table = _table_of(session)
     if table is None:
         session.send(error(ErrCode.BAD_STATE, "当前房间不是牌桌", request_id))
@@ -318,6 +331,7 @@ async def on_room_ready(session, data: dict, request_id: str | None) -> None:
 
 @register("bid")
 async def on_bid(session, data: dict, request_id: str | None) -> None:
+    """叫分：0 表示不叫，1~3 必须高于当前最高分。"""
     table = _table_of(session)
     if table is None:
         session.send(error(ErrCode.BAD_STATE, "当前房间不是牌桌", request_id))
@@ -335,6 +349,7 @@ async def on_bid(session, data: dict, request_id: str | None) -> None:
 
 @register("play")
 async def on_play(session, data: dict, request_id: str | None) -> None:
+    """出牌：cards 使用 '3s'/'BJ' 这类编码。"""
     table = _table_of(session)
     if table is None:
         session.send(error(ErrCode.BAD_STATE, "当前房间不是牌桌", request_id))
@@ -352,6 +367,7 @@ async def on_play(session, data: dict, request_id: str | None) -> None:
 
 @register("pass")
 async def on_pass(session, data: dict, request_id: str | None) -> None:
+    """过牌。"""
     table = _table_of(session)
     if table is None:
         session.send(error(ErrCode.BAD_STATE, "当前房间不是牌桌", request_id))

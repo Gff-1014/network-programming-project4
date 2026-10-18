@@ -44,6 +44,7 @@ async def printer(bots: list[DoudizhuBot], stop: asyncio.Event) -> None:
 
 
 async def main() -> int:
+    """AI 陪打入口：占住座位并一直自动出牌。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9011)

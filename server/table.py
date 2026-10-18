@@ -27,6 +27,7 @@ class Table:
     kind = "doudizhu"
 
     def __init__(self, room, cfg) -> None:
+        """牌桌状态：座位表（账号→会话，None 表示断线托管）、观战者与对局实例。"""
         self.room = room
         self.cfg = cfg
         self.seats: dict[str, "Session | None"] = {}      # 昵称 -> 会话（None 表示断线托管中）
@@ -40,6 +41,7 @@ class Table:
     # ------------------------------------------------------------ 座位 ----
 
     def seat_names(self) -> list[str]:
+        """按座位顺序返回账号列表。"""
         return list(self.seats)
 
     def can_join(self, session: "Session") -> tuple[bool, str | None, str | None]:
@@ -54,6 +56,7 @@ class Table:
         return False, ErrCode.ROOM_FULL, "牌桌已满（3 人 + 2 观战）"
 
     def session_of(self, session: "Session") -> str | None:
+        """根据连接找到对应座位账号；观战者返回 None。"""
         for nickname, seat in self.seats.items():
             if seat is session:
                 return nickname
@@ -83,6 +86,7 @@ class Table:
         return False, ErrCode.ROOM_FULL, "牌桌已满（3 人 + 2 观战）"
 
     def leave(self, session: "Session") -> None:
+        """离开牌桌：清座位/观战位并广播最新状态。"""
         nickname = self.session_of(session)
         if nickname is not None:
             self.seats.pop(nickname, None)
@@ -103,6 +107,7 @@ class Table:
         self.spectators.pop(session.conn_id, None)
 
     def on_resume(self, session: "Session") -> bool:
+        """玩家重连：把会话重新绑定到座位，并补发私有对局快照。"""
         nickname = session.nickname
         if nickname not in self.seats:
             return False
@@ -126,6 +131,7 @@ class Table:
             self._last_turn = None
 
     def ready(self, session: "Session") -> Action:
+        """准备：三人齐且都准备时开局；上一局已结算则清空后重开。"""
         nickname = self.session_of(session)
         if nickname is None:
             return Action(False, Err.BAD_STATE, "你不在牌桌座位上")
@@ -173,6 +179,7 @@ class Table:
         return Action(True)
 
     def bid(self, session: "Session", score: int, request_id: str | None) -> Action:
+        """叫分：交给引擎判定，并把产生的事件翻译广播。"""
         nickname = self.session_of(session)
         if nickname is None or self.match is None:
             return Action(False, Err.BAD_STATE, "对局尚未开始")
@@ -184,6 +191,7 @@ class Table:
 
     def play(self, session: "Session", card_texts: list[str],
              request_id: str | None) -> Action:
+        """出牌：把协议里的 '3s' 编码还原成整数牌，交给引擎校验。"""
         nickname = self.session_of(session)
         if nickname is None or self.match is None:
             return Action(False, Err.BAD_STATE, "对局尚未开始")
@@ -198,6 +206,7 @@ class Table:
         return action
 
     def pass_turn(self, session: "Session", request_id: str | None) -> Action:
+        """过牌：交给引擎判定并广播结果。"""
         nickname = self.session_of(session)
         if nickname is None or self.match is None:
             return Action(False, Err.BAD_STATE, "对局尚未开始")
@@ -231,6 +240,7 @@ class Table:
     # ------------------------------------------------------------ 视图 ----
 
     def public_state(self) -> dict:
+        """公开视图：状态、轮次、各家张数、桌面牌、倍数与剩余时间（观战用）。"""
         if self.match is None:
             # 未开局也给出完整的公开字段，客户端不必做防御式解析
             return {
@@ -294,6 +304,7 @@ class Table:
     # ------------------------------------------------------------ 推送 ----
 
     def broadcast(self, payload: dict, droppable: bool = False) -> None:
+        """把一帧发给本桌所有玩家与观战者。"""
         for seat in list(self.seats.values()):
             if seat is not None:
                 seat.send(payload, droppable=droppable)
@@ -362,6 +373,7 @@ class Table:
                 self.ready_set.clear()
 
     def _send_hand(self, nickname: str, kind: str = "hand") -> None:
+        """给某个玩家发私有手牌（game_start=发牌，hand=拿底牌）。"""
         seat = self.seats.get(nickname)
         if seat is None or self.match is None:
             return

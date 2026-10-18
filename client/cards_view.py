@@ -57,18 +57,22 @@ def round_rect(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float,
 
 
 def _rank_text(card: int) -> str:
+    """取牌的点数文本（3~2、BJ/CJ）。"""
     return Card.STR_RANKS[Card.get_rank_int(card)]
 
 
 def _suit_icon(card: int) -> str:
+    """取花色符号（♠♥♦♣），王牌为空。"""
     return SUITS.get(Card.get_suit_int(card), "")
 
 
 def _color(card: int) -> str:
+    """红黑配色：♥♦ 用红色，其余黑色。"""
     return COLOR_RED if is_red(card) else COLOR_BLACK
 
 
 def is_joker(card: int) -> bool:
+    """判断是否大小王（点数索引 >= 13）。"""
     return Card.get_rank_int(card) >= 13
 
 
@@ -122,6 +126,7 @@ class HandCanvas(tk.Canvas):
     """手牌区：叠放显示，点击选牌。"""
 
     def __init__(self, parent, on_toggle=None, **kwargs) -> None:
+        """手牌画布：叠放显示，点击选牌。"""
         kwargs.setdefault("height", CARD_H + LIFT + 8)
         kwargs.setdefault("bg", COLOR_TABLE_BG)
         kwargs.setdefault("highlightthickness", 0)
@@ -133,11 +138,13 @@ class HandCanvas(tk.Canvas):
         self.bind("<Button-1>", self._on_click)
 
     def set_cards(self, cards, selected=None) -> None:
+        """设置手牌与选中集合后重绘。"""
         self.cards = list(cards)
         self.selected = set(selected or ())
         self.render()
 
     def render(self) -> None:
+        """按可用宽度计算叠放步长并逐张画牌。"""
         self.delete("all")
         if not self.cards:
             return
@@ -152,6 +159,7 @@ class HandCanvas(tk.Canvas):
                       tag=f"card-{index}")
 
     def _on_click(self, event) -> None:
+        """点击命中最上层的牌，回调切换选中状态。"""
         index = self._hit(event.x)
         if index is None or self.on_toggle is None:
             return
@@ -176,6 +184,7 @@ class TableCanvas(tk.Canvas):
     """出牌区：中央显示本轮桌面牌，右上角显示三张底牌。"""
 
     def __init__(self, parent, **kwargs) -> None:
+        """出牌区画布：中央本轮桌面牌、右上角底牌。"""
         kwargs.setdefault("height", SMALL_H + 12)
         kwargs.setdefault("bg", COLOR_TABLE_BG)
         kwargs.setdefault("highlightthickness", 0)
@@ -186,12 +195,14 @@ class TableCanvas(tk.Canvas):
         self.owner: str | None = None
 
     def set_state(self, table_cards, bottom_cards, owner=None) -> None:
+        """更新桌面牌/底牌后重绘。"""
         self.table_cards = list(table_cards)
         self.bottom_cards = list(bottom_cards)
         self.owner = owner
         self.render()
 
     def render(self) -> None:
+        """居中排列桌面牌，并在右上角画底牌。"""
         self.delete("all")
         width = max(self.winfo_width(), 200)
         if self.bottom_cards:

@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 class Session:
     def __init__(self, conn_id: str, reader: asyncio.StreamReader,
                  writer: asyncio.StreamWriter, hub, cfg) -> None:
+        """连接级状态：发送队列、最后活跃时间、丢弃计数与重连 token。"""
         self.conn_id = conn_id
         self.reader = reader
         self.writer = writer
@@ -51,6 +52,7 @@ class Session:
     # ------------------------------------------------------------- 生命周期 ----
 
     async def run(self) -> None:
+        """会话主循环：握手→逐帧分发；任何异常都只有 finally 一个出口。"""
         self._writer_task = asyncio.create_task(self._writer_loop())
         self.hub.add_session(self)
         try:
@@ -98,6 +100,7 @@ class Session:
         return payload
 
     async def _dispatch(self, payload: dict) -> None:
+        """按 type 查注册表；未知类型回错误，连续多次则断开。"""
         msg_type = payload.get("type")
         request_id = payload.get("request_id")
         if not isinstance(msg_type, str):
@@ -140,11 +143,14 @@ class Session:
         return True
 
     async def _writer_loop(self) -> None:
+        """唯一的写协程：从有界队列取字节写入 socket，背压在这里体现。"""
         try:
             while True:
                 data = await self.queue.get()
                 self._queue_bytes = max(0, self._queue_bytes - len(data))
                 try:
+                    # drain() 只阻塞本连接的写协程：慢客户端会卡住自己的队列，
+                    # 不会拖住其他连接（这正是 M1 慢客户端对照实验验证的点）。
                     self.writer.write(data)
                     await self.writer.drain()
                 finally:
@@ -202,10 +208,12 @@ class Session:
             return False
 
     def ping(self) -> bool:
+        """发心跳：控制帧直接写传输层，绕过业务队列，避免被积压拖慢。"""
         self.last_ping_ms = protocol.now_ms()
         return self.send_control(make("ping", {"interval_ms": self.cfg.ping_interval_ms}))
 
     def _on_drop(self, droppable: bool) -> None:
+        """队列满时的丢弃处理：按时间窗口统计，达到阈值判定慢客户端。"""
         self.dropped += 1
         self.hub.dropped_total += 1
         now = protocol.now_ms()
@@ -243,6 +251,7 @@ class Session:
         asyncio.get_running_loop().create_task(self._close_later(0.3))
 
     async def _close_later(self, delay: float) -> None:
+        """延迟关闭：先让错误帧发出去，再断开连接。"""
         await asyncio.sleep(delay)
         await self.close("slow consumer", keep_reservation=False)
 

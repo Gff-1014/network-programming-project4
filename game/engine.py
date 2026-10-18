@@ -29,6 +29,7 @@ from .cards import Card
 
 
 class State(str, Enum):
+    """对局阶段：等待/发牌/叫分/出牌/结算。"""
     WAITING = "WAITING"
     DEALING = "DEALING"
     BIDDING = "BIDDING"
@@ -73,12 +74,14 @@ class Action:
 
 @dataclass
 class Match:
+    """一局对局：从三人准备到结算的完整状态机（纯逻辑，不含网络）。"""
     players: list[str]
     seed: int | None = None
     config: MatchConfig = field(default_factory=MatchConfig)
     clock: object = None  # Callable[[], int]，毫秒
 
     def __post_init__(self) -> None:
+        """初始化一局的全部状态字段。"""
         self.cfg = self.config
         if self.clock is None:
             self.clock = lambda: int(time.monotonic() * 1000)  # noqa: E731
@@ -110,12 +113,15 @@ class Match:
 
     @property
     def landlord_side(self) -> list[str]:
+        """地主之外的两名农民。"""
         return [p for p in self.players if p != self.landlord] if self.landlord else []
 
     def hand_counts(self) -> dict[str, int]:
+        """各家剩余手牌数。"""
         return {p: len(h) for p, h in self.hands.items()}
 
     def _emit(self, **event) -> None:
+        """追加一条带服务端时间戳的事件。"""
         event.setdefault("ts_ms", self.clock())
         event.setdefault("state", self.state.value)
         self.events.append(event)
@@ -125,6 +131,7 @@ class Match:
         self.deadline_ms = self.clock() + timeout_ms if timeout_ms > 0 else None
 
     def drain_events(self) -> list[dict]:
+        """取出并清空累计的事件（网络层据此广播）。"""
         events, self.events = self.events, []
         return events
 
@@ -143,6 +150,7 @@ class Match:
         return Action(True)
 
     def _deal(self) -> None:
+        """洗牌发牌：固定 seed 可复现，并确定第一个叫分的人。"""
         self.state = State.DEALING
         self.deal_round += 1
         deal_seed = None if self.seed is None else self.seed + self.deal_round - 1
@@ -368,6 +376,7 @@ class Match:
     # ------------------------------------------------------------ 结算 ----
 
     def _settle(self, winner: str) -> None:
+        """结算：判断春天、计算倍数与零和分数。"""
         landlord_win = winner == self.landlord
         spring = landlord_win and all(
             self.play_counts[p] == 0 for p in self.landlord_side
@@ -375,6 +384,7 @@ class Match:
         if spring:
             self.multiplier *= 2
         total = self.cfg.base_score * self.multiplier
+        # 零和结算：地主 ±2×总分，两个农民各 ∓总分，三人相加恒为 0。
         scores = {p: -total for p in self.players}
         scores[self.landlord] = -2 * total
         if landlord_win:

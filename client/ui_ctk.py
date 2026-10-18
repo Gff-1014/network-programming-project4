@@ -109,6 +109,7 @@ def style_ttk(style) -> None:
 # ------------------------------------------------------------ 登录页 ----
 
 class ConnectFrame(ctk.CTkFrame):
+    """CTk 登录页：圆角卡片 + 账号密码 + 创建账号。"""
     def __init__(self, parent, app) -> None:
         super().__init__(parent, fg_color=APP_BG, corner_radius=0)
         self.app = app
@@ -164,6 +165,7 @@ class ConnectFrame(ctk.CTkFrame):
 # -------------------------------------------------------------- 大厅 ----
 
 class LobbyFrame(ctk.CTkFrame):
+    """CTk 大厅：房间、在线玩家、私聊会话与建群。"""
     def __init__(self, parent, app) -> None:
         super().__init__(parent, fg_color=APP_BG, corner_radius=0)
         self.app = app
@@ -343,6 +345,7 @@ class PrivateChatFrame(ctk.CTkFrame):
 
 
 class RoomFrame(ctk.CTkFrame):
+    """CTk 聊天室/群聊页面。"""
     def __init__(self, parent, app) -> None:
         super().__init__(parent, fg_color=APP_BG, corner_radius=0)
         self.app = app

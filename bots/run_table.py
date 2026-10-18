@@ -24,6 +24,7 @@ from client.net import Connection  # noqa: E402
 
 
 async def main() -> int:
+    """三机器人走网络打完整局的演示入口。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9011)

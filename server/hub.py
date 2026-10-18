@@ -59,6 +59,7 @@ class Reservation:
 
 class Room:
     def __init__(self, name: str, kind: str = "chat") -> None:
+        """初始化房间：kind 区分聊天室/牌桌/群聊，members 以 conn_id 为键。"""
         self.name = name
         self.kind = kind
         self.members: dict[str, "Session"] = {}
@@ -66,12 +67,15 @@ class Room:
         self.table: Table | None = None
 
     def add(self, session: "Session") -> None:
+        """把在线会话加入成员表（conn_id 作为键，断线时可精确移除）。"""
         self.members[session.conn_id] = session
 
     def remove(self, session: "Session") -> None:
+        """从成员表移除会话；重复调用是安全的。"""
         self.members.pop(session.conn_id, None)
 
     def nicknames(self) -> list[str]:
+        """返回房间内成员的账号列表（用于在线列表推送）。"""
         return sorted(s.nickname for s in self.members.values() if s.nickname)
 
     def broadcast(self, payload: dict, droppable: bool = False,
@@ -86,6 +90,7 @@ class Room:
         return sent
 
     def snapshot(self) -> dict:
+        """房间摘要：名字/类型/人数/群主，供房间列表使用。"""
         return {"name": self.name, "kind": self.kind, "count": len(self.members),
                 "owner": self.owner}
 
@@ -94,6 +99,7 @@ class Hub:
     """全局状态：房间表、连接表、昵称表、重连预约表。"""
 
     def __init__(self, cfg) -> None:
+        """全局状态：房间表、会话表、账号表、重连预约与私信历史。"""
         self.cfg = cfg
         self.rooms: dict[str, Room] = {}
         self.sessions: dict[str, "Session"] = {}
@@ -116,14 +122,17 @@ class Hub:
     # ------------------------------------------------------------- 连接 ----
 
     def add_session(self, session: "Session") -> None:
+        """登记新连接（未登录也登记，用于统计待登录连接数）。"""
         self.sessions[session.conn_id] = session
 
     def pending_count(self) -> int:
+        """尚未完成登录的连接数（用于限制半开连接）。"""
         return sum(1 for s in self.sessions.values() if not s.nickname)
 
     # ------------------------------------------------------------- 登录 ----
 
     def _new_token(self) -> str:
+        """生成 32 字节十六进制重连令牌。"""
         return secrets.token_hex(16)
 
     def login(self, session: "Session", account: str,
@@ -208,6 +217,7 @@ class Hub:
             del box[: len(box) - self.cfg.max_private_history]
 
     def private_history(self, account: str, peer: str) -> list[dict]:
+        """取两个账号之间的私信历史（按时间正序）。"""
         return list(self.private_log.get(tuple(sorted((account, peer))), []))
 
     def conversations_of(self, account: str) -> list[dict]:
@@ -252,6 +262,7 @@ class Hub:
         return True, None, None
 
     def _enter_room(self, session: "Session", room_name: str, resumed: bool = False) -> Room:
+        """把会话放进指定房间并广播成员变化（resumed 表示重连恢复）。"""
         room = self.rooms[room_name]
         room.add(session)
         session.room = room.name
@@ -308,6 +319,7 @@ class Hub:
     # ------------------------------------------------------------- 预约 ----
 
     def _expire_reservation(self, reservation: Reservation) -> None:
+        """预约过期：正式注销账号并广播离开。"""
         self.reservations.pop(reservation.token, None)
         self.reserved_names.pop(reservation.nickname, None)
         room = self.rooms.get(reservation.room)
@@ -327,11 +339,13 @@ class Hub:
         return len(expired)
 
     def reserved_count(self) -> int:
+        """当前处于重连保护期的账号数。"""
         return len(self.reservations)
 
     # ------------------------------------------------------------- 房间 ----
 
     def join(self, session: "Session", room_name: str) -> tuple[bool, str | None, str | None]:
+        """切换房间：离开原房间、加入新房间，并广播两边的成员变化。"""
         room = self.rooms.get(room_name)
         if room is None:
             return False, ErrCode.ROOM_NOT_FOUND, f"房间 {room_name} 不存在"
@@ -350,11 +364,13 @@ class Hub:
         return True, None, None
 
     def leave(self, session: "Session") -> tuple[bool, str | None, str | None]:
+        """回到大厅（大厅不可退出）。"""
         if session.room == self.cfg.lobby_room:
             return False, ErrCode.NOT_IN_ROOM, "大厅是默认房间，不能退出"
         return self.join(session, self.cfg.lobby_room)
 
     def room_of(self, session: "Session") -> Room | None:
+        """取会话当前所在房间。"""
         return self.rooms.get(session.room) if session.room else None
 
     # ------------------------------------------------------------- 群聊 ----
@@ -408,29 +424,35 @@ class Hub:
         return True, None, None
 
     def groups_of(self, session: "Session") -> list[dict]:
+        """列出所有群聊摘要（统计/调试用）。"""
         return [room.snapshot() for room in self.rooms.values() if room.kind == "group"]
 
     def find_by_nickname(self, nickname: str) -> "Session | None":
+        """按账号查找在线会话（私信投递用）。"""
         return self.by_nickname.get(nickname)
 
     # ------------------------------------------------------------- 推送 ----
 
     def room_list(self) -> list[dict]:
+        """房间摘要列表，客户端大厅直接展示。"""
         return [room.snapshot() for room in self.rooms.values()]
 
     def broadcast_room_list(self) -> None:
+        """把房间列表推给所有已登录会话。"""
         payload = make("room_list", {"rooms": self.room_list()})
         for session in list(self.sessions.values()):
             if session.nickname:
                 session.send(payload)
 
     def broadcast_room_users(self, room: Room) -> None:
+        """把某房间的成员列表推给该房间成员。"""
         room.broadcast(
             make("room_users", {"room": room.name, "users": room.nicknames()}),
             droppable=True,
         )
 
     def online_count(self) -> int:
+        """在线账号数。"""
         return len(self.by_nickname)
 
     async def close_all(self, reason: str = "server shutdown") -> int:
@@ -442,4 +464,5 @@ class Hub:
 
     def error_for(self, session: "Session", code: str, message: str,
                   request_id: str | None = None) -> None:
+        """给指定会话发一个错误帧（便捷方法）。"""
         session.send(error(code, message, request_id))

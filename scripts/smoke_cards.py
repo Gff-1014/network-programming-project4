@@ -37,6 +37,7 @@ def hand_text(cards) -> str:
 
 
 def main() -> int:
+    """牌型引擎冒烟：发牌、识别、比较、可压牌与模拟出牌。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=20261011)
     args = parser.parse_args()

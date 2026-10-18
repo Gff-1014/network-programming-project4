@@ -59,6 +59,7 @@ def describe_events(events: list[dict]) -> None:
 
 
 def main() -> int:
+    """对局状态机冒烟：三个机器人打完整局并打印结算。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=20261011)
     parser.add_argument("--quiet", action="store_true", help="只打印结果")

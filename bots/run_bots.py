@@ -51,7 +51,9 @@ def spawn_slow_client(host: str, port: int, nickname: str, room: str) -> threadi
 
 
 class Bot:
+    """压测用机器人：登录、进房、发消息并统计到达率与延迟。"""
     def __init__(self, nick: str, args, stats: dict) -> None:
+        """初始化机器人与去重集合。"""
         self.nick = nick
         self.args = args
         self.stats = stats
@@ -61,6 +63,7 @@ class Bot:
         self.seen: set[str] = set()  # 每个机器人各自去重，不能共用
 
     async def start(self) -> bool:
+        """连接、登录、进房并启动收消息任务。"""
         try:
             self.conn = await Connection.connect(self.args.host, self.args.port)
             await self.conn.login(self.nick)
@@ -73,6 +76,7 @@ class Bot:
         return True
 
     async def _reader(self) -> None:
+        """统计收到的广播消息与延迟。"""
         assert self.conn is not None
         while True:
             try:
@@ -95,6 +99,7 @@ class Bot:
                 self.stats["latencies"].append((time.perf_counter() - sent_at) * 1000)
 
     async def say(self, index: int, run_id: str) -> None:
+        """发一条带唯一标记的压测消息。"""
         assert self.conn is not None
         marker = f"m-{self.nick}-{index}-{run_id}"
         self.stats["sent_at"][marker] = time.perf_counter()
@@ -106,6 +111,7 @@ class Bot:
             self.stats["errors"] = self.stats.get("errors", 0) + 1
 
     async def stop(self) -> None:
+        """主动登出并关闭连接。"""
         if self.task:
             self.task.cancel()
         if self.conn:
@@ -119,6 +125,7 @@ class Bot:
 
 
 def _marker_of(text: str) -> str | None:
+    """从消息文本里取出压测标记。"""
     for token in text.split():
         if token.startswith("m-"):
             return token
@@ -126,6 +133,7 @@ def _marker_of(text: str) -> str | None:
 
 
 async def main() -> int:
+    """多客户端压测入口。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9011)

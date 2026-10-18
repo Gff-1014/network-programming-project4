@@ -36,9 +36,11 @@ FONT_LOG = ("Microsoft YaHei UI", 9)
 
 
 class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
+    """主窗口：管理各页面、状态栏、动作封装与事件分发。"""
     def __init__(self, bridge: AsyncBridge, host: str = "127.0.0.1", port: int = 9011,
                  nickname: str = "", auto_login: bool = False, auto_room: str = "",
                  auto_ready: bool = False) -> None:
+        """创建根窗口、页面容器与状态栏，并启动事件轮询。"""
         super().__init__()
         self.title("斗地主聊天室")
         self.geometry("1000x700")
@@ -105,6 +107,7 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
     # ------------------------------------------------------------ 视图切换 ----
 
     def show(self, name: str) -> None:
+        """把指定页面置顶并触发它的 on_show。"""
         self.frames[name].tkraise()
         self.frames[name].on_show()
 
@@ -122,9 +125,11 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
         future.add_done_callback(done)
 
     def _enqueue_event(self, kind: str, data: dict) -> None:
+        """后台线程把事件放进线程安全队列。"""
         self.events.put((kind, data))
 
     def _drain_events(self) -> None:
+        """主线程每 50ms 消费一次事件队列。"""
         while True:
             try:
                 kind, data = self.events.get_nowait()
@@ -137,6 +142,8 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
         self.after(50, self._drain_events)
 
     def _handle_event(self, kind: str, data: dict) -> None:
+        # 事件由后台 asyncio 线程放进队列，这里在主线程消费：
+        # Tk 控件只能在主线程操作，所以所有网络结果都必须经这条路径回到界面。
         if kind == "_error":
             self.status_var.set(data.get("message", "操作失败"))
             messagebox.showerror("操作失败", data.get("message", "操作失败"))
@@ -194,6 +201,7 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
         self._refresh_status()
 
     def _refresh_status(self) -> None:
+        """状态栏显示账号、房间、对局与手牌概要。"""
         session = self.session
         bits = []
         if session.nickname:
@@ -381,6 +389,7 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
 
 
 class BaseFrame(ttk.Frame):
+    """页面基类：统一 on_show/on_event 接口。"""
     def __init__(self, parent, app: ChatApp) -> None:
         super().__init__(parent, padding=8)
         self.app = app
@@ -393,6 +402,7 @@ class BaseFrame(ttk.Frame):
 
 
 class ConnectFrame(BaseFrame):
+    """登录页：账号密码登录、创建账号。"""
     def __init__(self, parent, app: ChatApp) -> None:
         super().__init__(parent, app)
         box = ttk.LabelFrame(self, text="登录", padding=16)
@@ -429,6 +439,7 @@ class ConnectFrame(BaseFrame):
 
 
 class LobbyFrame(BaseFrame):
+    """大厅：房间、在线玩家、私聊会话、建群与登出。"""
     def __init__(self, parent, app: ChatApp) -> None:
         super().__init__(parent, app)
         header = ttk.Frame(self)
@@ -527,6 +538,7 @@ class LobbyFrame(BaseFrame):
 
 
 class RoomFrame(BaseFrame):
+    """聊天室/群聊页面。"""
     def __init__(self, parent, app: ChatApp) -> None:
         super().__init__(parent, app)
         header = ttk.Frame(self)
@@ -706,6 +718,7 @@ class TableFrame(BaseFrame):
         self._configure_log_tags()
 
     def _configure_log_tags(self) -> None:
+        """牌局日志按来源着色（自己/系统/警报）。"""
         self.log_box.tag_configure("chat", foreground="#1A1A1A")
         self.log_box.tag_configure("me", foreground="#2F6FED")
         self.log_box.tag_configure("system", foreground="#808080")

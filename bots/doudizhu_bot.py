@@ -18,7 +18,9 @@ from client.net import Connection
 
 
 class DoudizhuBot:
+    """走协议的斗地主机器人：维护自己的手牌与公开状态，用 game.ai 决策。"""
     def __init__(self, nickname: str, conn: Connection, room: str) -> None:
+        """初始化机器人状态与收消息任务。"""
         self.nickname = nickname
         self.conn = conn
         self.room = room
@@ -41,11 +43,13 @@ class DoudizhuBot:
     # ------------------------------------------------------------ 生命周期 ----
 
     async def join_and_ready(self) -> None:
+        """进房并准备，同时启动收消息循环。"""
         await self.conn.join_room(self.room)
         self._task = asyncio.create_task(self._loop())
         await self.conn.request("room_ready", {})
 
     async def play_until_end(self, timeout: float = 120.0) -> dict:
+        """等待一局结束并返回结算数据。"""
         await asyncio.wait_for(self.finished.wait(), timeout)
         assert self.result is not None
         return self.result
@@ -66,12 +70,14 @@ class DoudizhuBot:
             await self.conn.request("room_ready", {})
 
     async def stop(self) -> None:
+        """停止收消息任务。"""
         if self._task:
             self._task.cancel()
 
     # ------------------------------------------------------------ 收消息 ----
 
     async def _loop(self) -> None:
+        """收消息主循环。"""
         try:
             while True:
                 frame = await self.conn.recv()
@@ -82,6 +88,7 @@ class DoudizhuBot:
             self.errors.append(f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")
 
     async def _handle(self, frame: dict) -> None:
+        """更新本地状态，并在轮到自己时行动。"""
         kind = frame.get("type")
         data: dict[str, Any] = frame.get("data") or {}
 
@@ -141,6 +148,7 @@ class DoudizhuBot:
             await self._maybe_act()
 
     def _apply_public(self, data: dict) -> None:
+        """用 table_state 同步公开信息。"""
         self.state = data.get("state")
         self.current = data.get("current")
         self.landlord = data.get("landlord")
@@ -153,6 +161,7 @@ class DoudizhuBot:
     # ------------------------------------------------------------ 决策 ----
 
     async def _maybe_act(self) -> None:
+        """只在拿到权威轮次信息（table_state/手牌）时行动。"""
         if self.finished.is_set() or self.state is None:
             return
         key = (self.state, self.current, self.history_len)
@@ -180,6 +189,7 @@ class DoudizhuBot:
 
 
 def _rank(card: int) -> int:
+    """取牌的点数索引（用于排序）。"""
     from game.cards import Card
 
     return Card.get_rank_int(card)

@@ -17,6 +17,7 @@ from .net import Connection, ServerError
 
 class ClientSession:
     def __init__(self, on_event: Callable[[str, dict], None] | None = None) -> None:
+        """客户端状态：账号、房间、手牌、对局、会话列表与私信历史。"""
         self.conn: Connection | None = None
         self.on_event = on_event or (lambda kind, data: None)
         self.account: str | None = None
@@ -41,11 +42,13 @@ class ClientSession:
     # ------------------------------------------------------------ 连接 ----
 
     async def connect(self, host: str, port: int) -> None:
+        """建立连接并启动消息泵（登出后再次登录可复用）。"""
         self._closed = False
         self.conn = await Connection.connect(host, port)
         self._pump_task = asyncio.create_task(self._pump())
 
     async def _pump(self) -> None:
+        """持续收消息交给 _handle，并转成界面事件。"""
         assert self.conn is not None
         while not self._closed:
             try:
@@ -60,6 +63,7 @@ class ClientSession:
                 self._note(f"处理 {frame.get('type')} 出错: {exc}")
 
     async def close(self) -> None:
+        """关闭连接（不额外发送 logout）。"""
         self._closed = True
         if self._pump_task:
             self._pump_task.cancel()
@@ -74,6 +78,7 @@ class ClientSession:
     # ------------------------------------------------------------ 动作 ----
 
     async def login(self, account: str, password: str = "123456") -> dict:
+        """账号密码登录并同步 welcome 内容，随后刷新会话列表。"""
         assert self.conn is not None
         welcome = await self.conn.login(account, password)
         data = self._apply_welcome(welcome["data"])
@@ -120,6 +125,7 @@ class ClientSession:
                                          "messages": self.private_history[peer]})
 
     async def send_private(self, text: str) -> None:
+        """给当前私聊对象发消息，并刷新会话列表。"""
         if not self.current_peer:
             raise RuntimeError("还没有选择私聊对象")
         await self.whisper(self.current_peer, text)
@@ -156,10 +162,12 @@ class ClientSession:
         return room
 
     async def delete_group(self, room: str) -> None:
+        """解散当前群聊。"""
         assert self.conn is not None
         await self.conn.delete_group(room)
 
     async def refresh_rooms(self) -> None:
+        """拉取房间列表。"""
         if self.conn is None or self._closed:
             return
         reply = await self.conn.list_rooms()
@@ -177,6 +185,7 @@ class ClientSession:
         self.on_event("user_list", data)
 
     async def join_room(self, room: str) -> dict:
+        """进入房间并记录角色（player/spectator）。"""
         if self.conn is None:
             raise RuntimeError("尚未连接服务器")
         reply = await self.conn.join_room(room)
@@ -186,6 +195,7 @@ class ClientSession:
         return reply["data"]
 
     async def spectate(self, room: str) -> dict:
+        """以观战身份进入牌桌。"""
         assert self.conn is not None
         reply = await self.conn.request("spectate", {"room": room})
         self.room = room
@@ -194,6 +204,7 @@ class ClientSession:
         return reply["data"]
 
     async def leave_room(self) -> None:
+        """退出房间回大厅并清理本地对局状态。"""
         assert self.conn is not None
         reply = await self.conn.leave_room()
         self.room = reply["data"].get("to")   # 服务端会把人放回大厅
@@ -204,11 +215,13 @@ class ClientSession:
         self.on_event("left", {"room": self.room})
 
     async def say(self, text: str) -> None:
+        """发送房间消息。"""
         if self.conn is None:
             raise RuntimeError("尚未连接服务器")
         await self.conn.room_msg(text)
 
     async def whisper(self, to: str, text: str) -> None:
+        """发送私信，并在本地补一行“我 → 对方”的日志。"""
         if self.conn is None:
             raise RuntimeError("尚未连接服务器")
         await self.conn.private_msg(to, text)
@@ -221,24 +234,29 @@ class ClientSession:
         )
 
     async def ready(self) -> None:
+        """在牌桌点准备。"""
         assert self.conn is not None
         await self.conn.request("room_ready", {})
 
     async def bid(self, score: int) -> None:
+        """叫分。"""
         assert self.conn is not None
         await self.conn.request("bid", {"score": score})
 
     async def play(self, cards: list[int]) -> None:
+        """出牌（把整数牌转成协议编码）。"""
         assert self.conn is not None
         from game.text import card_code
 
         await self.conn.request("play", {"cards": [card_code(c) for c in cards]})
 
     async def pass_turn(self) -> None:
+        """过牌。"""
         assert self.conn is not None
         await self.conn.request("pass", {})
 
     async def request_state(self) -> None:
+        """请求对局快照。"""
         assert self.conn is not None
         await self.conn.request("game_state", {})
 
@@ -256,6 +274,7 @@ class ClientSession:
     # ------------------------------------------------------------ 收消息 ----
 
     async def _handle(self, kind: str, data: dict) -> None:
+        """协议消息 → 本地状态 + 一行日志 + 界面事件（界面不再自己解析协议）。"""
         line: str | None = None
         if kind == "room_list":
             self.rooms = data.get("rooms", [])
@@ -349,6 +368,7 @@ class ClientSession:
         self._emit(kind, data, line)
 
     def _note(self, text: str) -> None:
+        """追加一行日志（最多保留 200 行）。"""
         self.log.append(text)
         self.log = self.log[-200:]
 
