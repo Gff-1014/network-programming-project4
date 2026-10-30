@@ -1,5 +1,7 @@
-# 运行期不依赖任何第三方库（标准库 + tkinter）
-# 例外：窗口客户端的界面美化使用 customtkinter（MIT）；服务端仍然零依赖
+# 运行期核心使用标准库 + tkinter；网页版网关使用 aiohttp
+aiohttp>=3.9,<4
+qrcode>=7.4,<9
+# 窗口客户端的界面美化使用 customtkinter（MIT）；服务端仍然零依赖
 customtkinter==6.0.0
 # 以下仅测试期使用
 pytest==9.1.1

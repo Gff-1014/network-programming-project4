@@ -43,6 +43,7 @@ async def heartbeat_sweeper(hub: Hub) -> None:
         for room in hub.rooms.values():
             if room.table is not None:
                 await room.table.tick(now)
+        hub.sweep_group_polls()
 
 
 async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,

@@ -31,6 +31,27 @@ async def ready_all(conns):
         await conn.request("room_ready", {})
 
 
+async def test_logout_while_seated_releases_seat_and_resets_match(server):
+    """主动登出应离开牌桌，避免网页关闭后留下无法重开的旧局。"""
+    names = ["logout0", "logout1", "logout2"]
+    conns, _ = await make_seated(server, names, room="牌桌2")
+    await ready_all(conns)
+    for conn in conns:
+        await conn.wait_for("game_start", timeout=3.0)
+
+    table = server.hub.rooms["牌桌2"].table
+    assert table is not None
+    assert table.match is not None
+
+    await conns[0].request("logout", {})
+    await asyncio.sleep(0.1)
+
+    assert names[0] not in table.seats
+    assert table.match is None, "主动登出后不应把旧局留给下一位玩家"
+    for conn in conns[1:]:
+        await conn.request("logout", {})
+
+
 async def test_seats_and_spectators(server):
     conns, roles = await make_seated(server, ["p0", "p1", "p2", "p3", "p4"])
     assert roles == ["player", "player", "player", "spectator", "spectator"]
@@ -59,6 +80,28 @@ async def test_ready_deals_private_hands(server):
     # 公开视图不含任何手牌
     public = await conns[0].wait_for("table_state", timeout=3.0)
     assert "hand" not in public["data"]
+    for conn in conns:
+        await conn.close()
+
+
+async def test_ready_state_is_public_before_deal(server):
+    conns, _ = await make_seated(server, ["ready0", "ready1", "ready2"])
+    await conns[0].request("room_ready", {})
+    state = await conns[1].wait_for(
+        "table_state",
+        timeout=3.0,
+        match={"ready": ["ready0"]},
+    )
+    assert state["data"]["ready"] == ["ready0"]
+
+    await conns[1].request("room_ready", {})
+    state = await conns[2].wait_for(
+        "table_state",
+        timeout=3.0,
+        match={"ready": ["ready0", "ready1"]},
+    )
+    assert set(state["data"]["ready"]) == {"ready0", "ready1"}
+
     for conn in conns:
         await conn.close()
 
@@ -188,6 +231,34 @@ async def test_disconnected_player_is_auto_played(server_factory):
     assert len(table.match.history) > before, "掉线玩家应由服务端托管自动出牌"
     assert table.seats[first] is None, "掉线期间保留座位并标记离线"
     for conn in conns:
+        await conn.close()
+
+
+async def test_reserved_seat_is_released_after_grace(server_factory):
+    """重连宽限期结束后，不能永久占着牌桌座位。"""
+    server = await server_factory(
+        reconnect_grace_ms=150,
+        sweep_interval_ms=50,
+    )
+    room_name = "牌桌3"
+    conns, _ = await make_seated(server, ["expire0", "expire1", "expire2"], room=room_name)
+    table = server.hub.rooms[room_name].table
+    assert table is not None
+
+    await conns[0].close()
+    for _ in range(40):
+        if "expire0" not in table.seats:
+            break
+        await asyncio.sleep(0.1)
+    assert "expire0" not in table.seats, "预约过期后应释放座位"
+    assert table.match is None, "座位释放后应清理旧局"
+
+    newcomer = await Connection.connect(server.host, server.port)
+    await newcomer.login("expire3")
+    reply = await newcomer.join_room(room_name)
+    assert reply["data"]["role"] == "player"
+
+    for conn in conns[1:] + [newcomer]:
         await conn.close()
 
 

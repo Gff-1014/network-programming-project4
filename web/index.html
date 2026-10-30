@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#101914">
+  <title>斗地主聊天室 · 网页版</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <section id="auth-screen" class="screen auth-screen">
+    <div class="auth-card">
+      <div class="brand-mark">♠</div>
+      <h1>斗地主聊天室</h1>
+      <p class="muted">局域网多人聊天与牌桌</p>
+
+      <p id="auth-status" class="status">正在连接服务器…</p>
+
+      <form id="login-form" class="auth-form">
+        <label>
+          账号
+          <input id="login-account" autocomplete="username" maxlength="32"
+                 placeholder="例如 wanjia1" required>
+        </label>
+        <label>
+          密码
+          <input id="login-password" type="password" autocomplete="current-password"
+                 value="123456" maxlength="64" required>
+        </label>
+        <button class="primary" type="submit">登录</button>
+      </form>
+
+      <form id="register-form" class="auth-form" hidden>
+        <label>
+          新账号
+          <input id="register-account" autocomplete="username" maxlength="32"
+                 placeholder="输入新账号" required>
+        </label>
+        <label>
+          新密码
+          <input id="register-password" type="password" autocomplete="new-password"
+                 minlength="4" maxlength="64" placeholder="至少 4 位" required>
+        </label>
+        <button class="primary" type="submit">创建并登录</button>
+        <button id="cancel-register" class="ghost" type="button">返回登录</button>
+      </form>
+
+      <button id="show-register" class="link-button" type="button">
+        没有账号？创建一个
+      </button>
+      <p class="hint">默认账号：wanjia1 ~ wanjia5，初始密码 123456</p>
+    </div>
+  </section>
+
+  <section id="workspace" class="screen workspace" hidden>
+    <header class="topbar">
+      <div class="top-brand"><span class="brand-dot">♠</span> 斗地主聊天室</div>
+      <div class="top-user">
+        <span id="whoami">未登录</span>
+        <button id="refresh-btn" class="mini">刷新</button>
+        <button id="logout-btn" class="mini danger">登出</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <div class="side-title">
+          <span>房间</span>
+          <button id="create-channel-btn" class="mini" hidden>+ 频道</button>
+        </div>
+        <div id="room-list" class="list"></div>
+
+        <div class="side-title">
+          <span>在线玩家</span>
+          <button id="refresh-users-btn" class="mini">刷新</button>
+        </div>
+        <div id="user-list" class="list user-list"></div>
+
+        <div class="side-title">
+          <span>私聊会话</span>
+          <button id="create-group-btn" class="mini">建群</button>
+        </div>
+        <div id="conversation-list" class="list"></div>
+      </aside>
+
+      <section class="center">
+        <div class="room-head">
+          <div>
+            <h2 id="room-title">大厅</h2>
+            <span id="room-meta" class="muted"></span>
+          </div>
+          <div class="room-actions">
+            <button id="rename-group-btn" class="mini" hidden>修改群名</button>
+            <button id="group-tools-btn" class="mini" hidden>群工具</button>
+            <button id="group-qr-btn" class="mini" hidden>邀请二维码</button>
+            <button id="leave-room-btn" class="mini" hidden>离开房间</button>
+            <button id="delete-group-btn" class="mini danger" hidden>解散群聊</button>
+          </div>
+        </div>
+
+        <div id="announcement-card" class="announcement-card" hidden>
+          <div class="announcement-head">
+            <span class="announcement-label">群公告</span>
+            <span id="announcement-meta" class="muted"></span>
+          </div>
+          <div id="announcement-text" class="announcement-text"></div>
+        </div>
+
+        <section id="group-panel" class="group-panel" hidden>
+          <div class="group-panel-head">
+            <strong>群功能</strong>
+            <div class="group-head-actions">
+              <button id="invite-group-member-btn" class="mini">邀请成员</button>
+              <button id="close-group-panel" class="mini">收起</button>
+            </div>
+          </div>
+          <div class="group-tabs">
+            <button class="group-tab active" data-group-tab="files">群文件</button>
+            <button class="group-tab" data-group-tab="polls">群投票</button>
+            <button class="group-tab" data-group-tab="announcement">群公告</button>
+          </div>
+          <div id="group-files-tab" class="group-tab-panel">
+            <div class="group-section-head">
+              <span>共享文件</span>
+              <button id="upload-file-btn" class="mini">上传文件</button>
+              <input id="file-input" type="file" hidden>
+            </div>
+            <div id="file-list" class="file-list"></div>
+          </div>
+          <div id="group-polls-tab" class="group-tab-panel" hidden>
+            <div class="group-section-head">
+              <span>群投票</span>
+              <button id="create-poll-btn" class="mini">发起投票</button>
+            </div>
+            <div id="poll-list" class="poll-list"></div>
+          </div>
+          <div id="group-announcement-tab" class="group-tab-panel" hidden>
+            <div class="group-section-head">
+              <span>群公告</span>
+              <button id="edit-announcement-btn" class="mini">编辑公告</button>
+            </div>
+            <div id="announcement-panel-text" class="announcement-panel-text"></div>
+          </div>
+          <div id="group-invite-pending" class="group-invite-pending" hidden>
+            <div class="group-section-head">
+              <span>入群申请（群主审核）</span>
+            </div>
+            <div id="group-pending-list" class="pending-list"></div>
+          </div>
+        </section>
+
+        <div id="table-panel" class="table-panel" hidden>
+          <div class="table-topline">
+            <span id="table-state" class="pill">等待开局</span>
+            <span id="table-current" class="muted"></span>
+            <span id="table-multiplier" class="muted"></span>
+          </div>
+          <div id="seat-grid" class="seat-grid"></div>
+          <div class="table-middle">
+            <div class="card-row">
+              <span class="card-row-label">底牌</span>
+              <div id="bottom-cards" class="mini-cards"></div>
+            </div>
+            <div class="card-row">
+              <span class="card-row-label">桌面</span>
+              <div id="table-cards" class="mini-cards"></div>
+            </div>
+          </div>
+          <div id="hand-area" class="hand-area"></div>
+          <div class="table-actions">
+            <button id="btn-ready" class="secondary">准备</button>
+            <button class="bid-button secondary" data-score="0">不叫</button>
+            <button class="bid-button secondary" data-score="1">1 分</button>
+            <button class="bid-button secondary" data-score="2">2 分</button>
+            <button class="bid-button secondary" data-score="3">3 分</button>
+            <button id="btn-play" class="primary">出牌</button>
+            <button id="btn-pass" class="secondary">过牌</button>
+            <button id="btn-auto" class="secondary">托管</button>
+          </div>
+          <div id="game-result" class="game-result"></div>
+        </div>
+
+        <div class="history-tools">
+          <button id="load-more-history" class="mini" hidden>加载更早消息</button>
+        </div>
+        <div id="chat-log" class="chat-log"></div>
+        <form id="chat-form" class="composer">
+          <input id="chat-input" maxlength="500" autocomplete="off"
+                 placeholder="输入房间消息…">
+          <button class="primary" type="submit">发送</button>
+        </form>
+      </section>
+
+      <aside id="private-panel" class="private-panel" hidden>
+        <div class="private-head">
+          <div>
+            <span class="muted">私聊</span>
+            <h3 id="private-title">—</h3>
+          </div>
+          <button id="close-private" class="mini">关闭</button>
+        </div>
+        <div class="history-tools">
+          <button id="load-more-private" class="mini" hidden>加载更早私信</button>
+        </div>
+        <div id="private-log" class="private-log"></div>
+        <form id="private-form" class="composer">
+          <input id="private-input" maxlength="500" autocomplete="off"
+                 placeholder="输入私信…">
+          <button class="primary" type="submit">发送</button>
+        </form>
+      </aside>
+    </main>
+  </section>
+
+  <div id="qr-modal" class="modal" hidden>
+    <div class="modal-card qr-card">
+      <div class="modal-head">
+        <div>
+          <span class="muted">邀请入群</span>
+          <h3>扫码加入当前群聊</h3>
+        </div>
+        <button id="close-qr" class="mini">关闭</button>
+      </div>
+      <div class="qr-wrap">
+        <img id="qr-image" alt="群邀请二维码">
+      </div>
+      <input id="invite-url" class="invite-url" readonly>
+    </div>
+  </div>
+
+  <div id="group-create-modal" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <span class="muted">创建群聊</span>
+          <h3>选择要邀请的在线玩家</h3>
+        </div>
+        <button id="cancel-group-create" class="mini">取消</button>
+      </div>
+      <div id="group-member-list" class="choice-list"></div>
+      <button id="confirm-group-create" class="primary modal-submit" type="button">
+        创建并邀请
+      </button>
+    </div>
+  </div>
+
+  <div id="poll-create-modal" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <span class="muted">群投票</span>
+          <h3>发起单选投票</h3>
+        </div>
+        <button id="cancel-poll-create" class="mini">取消</button>
+      </div>
+      <label class="form-field">
+        投票标题
+        <input id="poll-title" maxlength="80" placeholder="例如：这周的活动时间">
+      </label>
+      <div class="form-field">
+        <div class="option-title">
+          <span>投票选项</span>
+          <button id="add-poll-option" class="mini" type="button">+ 增加选项</button>
+        </div>
+        <div id="poll-option-inputs" class="option-inputs"></div>
+      </div>
+      <label class="form-field">
+        截止时间（分钟，留空表示不限期）
+        <input id="poll-deadline" type="number" min="1" placeholder="例如 60">
+      </label>
+      <button id="confirm-poll-create" class="primary modal-submit" type="button">
+        发起投票
+      </button>
+    </div>
+  </div>
+
+  <div id="group-invite-modal" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <span class="muted">邀请成员</span>
+          <h3>选择要邀请的在线玩家</h3>
+        </div>
+        <button id="cancel-group-invite" class="mini">取消</button>
+      </div>
+      <div id="group-invite-member-list" class="choice-list"></div>
+      <button id="confirm-group-invite" class="primary modal-submit" type="button">
+        发送入群申请
+      </button>
+    </div>
+  </div>
+
+  <div id="channel-create-modal" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <span class="muted">公共频道</span>
+          <h3>创建新频道</h3>
+        </div>
+        <button id="cancel-channel-create" class="mini">取消</button>
+      </div>
+      <label class="form-field">
+        频道名称
+        <input id="channel-name" maxlength="32" placeholder="例如：课程答疑">
+      </label>
+      <button id="confirm-channel-create" class="primary modal-submit" type="button">
+        创建频道
+      </button>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

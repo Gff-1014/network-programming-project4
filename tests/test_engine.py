@@ -206,17 +206,36 @@ def test_timeout_on_bidding_counts_as_pass():
     assert any(e["type"] == "timeout" and e["player"] == pending for e in match.drain_events())
 
 
-def test_timeout_on_follow_passes():
+def test_timeout_on_follow_plays_a_beating_card():
     clock = FakeClock()
     match = to_playing(new_match(clock=clock))
     landlord = match.landlord
-    card = min(match.hands[landlord], key=Card.get_rank_int)
-    assert match.play(landlord, [card]).ok
     follower = match.current
+    match.table = [Card.new("3s")]
+    match.table_owner = landlord
+    match.passes = 0
+    match.hands[follower] = [Card.new("4s")]
     match.drain_events()
     clock.advance(MatchConfig().play_timeout_ms + 1)
     assert match.tick().ok
-    assert any(e["type"] == "pass" and e["player"] == follower for e in match.drain_events() or [])
+    events = match.drain_events()
+    assert any(e["type"] == "play" and e["player"] == follower for e in events)
+    assert match.table == [Card.new("4s")]
+
+
+def test_timeout_on_follow_passes_only_when_cannot_beat():
+    clock = FakeClock()
+    match = to_playing(new_match(clock=clock))
+    landlord = match.landlord
+    follower = match.current
+    match.table = [Card.new("2s")]
+    match.table_owner = landlord
+    match.passes = 0
+    match.hands[follower] = [Card.new("3s")]
+    match.drain_events()
+    clock.advance(MatchConfig().play_timeout_ms + 1)
+    assert match.tick().ok
+    assert any(e["type"] == "pass" and e["player"] == follower for e in match.drain_events())
 
 
 def test_timeout_when_leading_plays_smallest_single():

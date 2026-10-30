@@ -27,10 +27,25 @@ C2S_TYPES = (
     "list_users",
     "list_conversations",
     "get_history",
+    "room_history",
+    "group_state",
+    "join_invite",
+    "invite_group_member",
+    "approve_group_invite",
+    "reject_group_invite",
     "join_room",
     "leave_room",
     "create_group",
+    "create_channel",
     "delete_group",
+    "rename_group",
+    "set_announcement",
+    "poll_create",
+    "poll_list",
+    "poll_vote",
+    "poll_close",
+    "group_file_register",
+    "group_file_delete",
     "room_ready",
     "bid",
     "play",
@@ -53,6 +68,7 @@ S2C_TYPES = (
     "user_list",
     "conversations",
     "history",
+    "room_history",
     "joined",
     "left",
     "room_users",
@@ -61,7 +77,19 @@ S2C_TYPES = (
     "user_left",
     "user_reconnecting",
     "group_created",
+    "channel_created",
     "group_deleted",
+    "group_renamed",
+    "group_state",
+    "group_invite_requested",
+    "group_invite_pending",
+    "group_invite_rejected",
+    "announcement_updated",
+    "poll_created",
+    "poll_updated",
+    "poll_closed",
+    "group_file_added",
+    "group_file_deleted",
     "logged_out",
     "room_msg",
     "private_msg",
@@ -110,6 +138,10 @@ class ErrCode(str):
     GROUP_NOT_FOUND = "GROUP_NOT_FOUND"
     NOT_GROUP_OWNER = "NOT_GROUP_OWNER"
     GROUP_MEMBER_OFFLINE = "GROUP_MEMBER_OFFLINE"
+    NOT_CHANNEL_ADMIN = "NOT_CHANNEL_ADMIN"
+    POLL_NOT_FOUND = "POLL_NOT_FOUND"
+    POLL_CLOSED = "POLL_CLOSED"
+    FILE_NOT_FOUND = "FILE_NOT_FOUND"
 
 
 # ------------------------------------------------------------------ 构造函数 ----

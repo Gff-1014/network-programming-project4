@@ -12,11 +12,16 @@
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+import uuid
 
 from .protocol import ErrCode, error, make, now_ms
+from .store import Store
 from .table import Table
+
+
+PUBLIC_CHANNEL_ADMIN = "wanjia1"
 
 
 def _edit_distance(a: str, b: str) -> int:
@@ -57,26 +62,95 @@ class Reservation:
     expired_reason: str = "断开超时"
 
 
+@dataclass
+class GroupPoll:
+    """群内单选投票。"""
+
+    poll_id: str
+    title: str
+    options: list[dict]
+    created_by: str
+    created_at_ms: int
+    deadline_ms: int | None = None
+    anonymous: bool = False
+    votes: dict[str, str] = field(default_factory=dict)
+    closed_at_ms: int | None = None
+
+    def closed(self, now: int | None = None) -> bool:
+        if self.closed_at_ms is not None:
+            return True
+        return self.deadline_ms is not None and (now or now_ms()) >= self.deadline_ms
+
+    def view(self, account: str, now: int | None = None) -> dict:
+        counts = {option["id"]: 0 for option in self.options}
+        for option_id in self.votes.values():
+            if option_id in counts:
+                counts[option_id] += 1
+        return {
+            "poll_id": self.poll_id,
+            "title": self.title,
+            "options": [dict(option, count=counts[option["id"]]) for option in self.options],
+            "created_by": self.created_by,
+            "created_at_ms": self.created_at_ms,
+            "deadline_ms": self.deadline_ms,
+            "anonymous": self.anonymous,
+            "closed": self.closed(now),
+            "total_votes": len(self.votes),
+            "my_vote": self.votes.get(account),
+        }
+
+
 class Room:
     def __init__(self, name: str, kind: str = "chat") -> None:
         """初始化房间：kind 区分聊天室/牌桌/群聊，members 以 conn_id 为键。"""
         self.name = name
+        self.display_name = name
         self.kind = kind
         self.members: dict[str, "Session"] = {}
+        self.member_accounts: set[str] = set()
         self.owner: str | None = None      # 群聊的群主账号
         self.table: Table | None = None
+        self.group_id: str | None = None
+        self.invite_token: str | None = None
+        self.announcement: dict = {
+            "text": "",
+            "updated_by": "",
+            "updated_at_ms": 0,
+            "revision": 0,
+        }
+        self.polls: dict[str, GroupPoll] = {}
+        self.files: dict[str, dict] = {}
+        self.pending_invites: dict[str, dict] = {}
 
     def add(self, session: "Session") -> None:
         """把在线会话加入成员表（conn_id 作为键，断线时可精确移除）。"""
         self.members[session.conn_id] = session
+        if session.nickname:
+            self.member_accounts.add(session.nickname)
 
     def remove(self, session: "Session") -> None:
         """从成员表移除会话；重复调用是安全的。"""
         self.members.pop(session.conn_id, None)
+        # 群成员关系由 group_members 持久化；退出在线会话不等于退群。
+        if self.kind != "group" and session.nickname:
+            self.member_accounts.discard(session.nickname)
 
     def nicknames(self) -> list[str]:
         """返回房间内成员的账号列表（用于在线列表推送）。"""
         return sorted(s.nickname for s in self.members.values() if s.nickname)
+
+    def has_account(self, account: str | None) -> bool:
+        """账号当前是否在房间中。"""
+        return bool(account) and account in self.member_accounts
+
+    def persistence_state(self) -> dict:
+        """群状态的 SQLite 快照。"""
+        return {
+            "announcement": dict(self.announcement),
+            "polls": [dict(poll.__dict__) for poll in self.polls.values()],
+            "files": [dict(item) for item in self.files.values()],
+            "pending_invites": [dict(item) for item in self.pending_invites.values()],
+        }
 
     def broadcast(self, payload: dict, droppable: bool = False,
                   exclude: "Session | None" = None) -> int:
@@ -91,8 +165,38 @@ class Room:
 
     def snapshot(self) -> dict:
         """房间摘要：名字/类型/人数/群主，供房间列表使用。"""
-        return {"name": self.name, "kind": self.kind, "count": len(self.members),
-                "owner": self.owner}
+        snapshot = {
+            "name": self.display_name,
+            "room_key": self.name,
+            "kind": self.kind,
+            "count": len(self.members),
+            "owner": self.owner,
+        }
+        if self.kind == "group":
+            snapshot["group_id"] = self.group_id
+        return snapshot
+
+    def group_state(self, account: str) -> dict:
+        """群成员看到的群公告、投票和文件快照。"""
+        now = now_ms()
+        return {
+            "room": self.name,
+            "room_name": self.display_name,
+            "group_id": self.group_id,
+            "owner": self.owner,
+            "invite_token": self.invite_token,
+            "announcement": dict(self.announcement),
+            "pending_invites": (
+                [dict(item) for item in self.pending_invites.values()]
+                if account == self.owner
+                else []
+            ),
+            "polls": [
+                poll.view(account, now)
+                for poll in self.polls.values()
+            ],
+            "files": [dict(item) for item in self.files.values()],
+        }
 
 
 class Hub:
@@ -101,6 +205,9 @@ class Hub:
     def __init__(self, cfg) -> None:
         """全局状态：房间表、会话表、账号表、重连预约与私信历史。"""
         self.cfg = cfg
+        self.store = Store(cfg.db_path)
+        self.store.seed_accounts(cfg.account_passwords)
+        cfg.account_passwords.update(self.store.load_accounts())
         self.rooms: dict[str, Room] = {}
         self.sessions: dict[str, "Session"] = {}
         self.by_nickname: dict[str, "Session"] = {}
@@ -113,11 +220,81 @@ class Hub:
             room = Room(name, kind="doudizhu")
             room.table = Table(room, cfg)
             self.rooms[name] = room
+        for name in cfg.public_channels:
+            room = Room(name, kind="channel")
+            room.owner = PUBLIC_CHANNEL_ADMIN
+            self.rooms[name] = room
+            self.store.save_room(
+                room.name,
+                room.display_name,
+                room.kind,
+                room.owner,
+                None,
+                None,
+                {},
+            )
         self.dropped_total = 0
         self.slow_consumer_disconnects = 0
         self.idle_timeouts = 0
         self._group_seq = 0
         self.private_log: dict[tuple[str, str], list[dict]] = {}
+        self.invite_tokens: dict[str, str] = {}
+        self._load_persisted_rooms()
+
+    def _load_persisted_rooms(self) -> None:
+        """恢复群、频道、成员和群状态。"""
+        members = self.store.load_group_members()
+        for row in self.store.load_rooms():
+            key = row["room_key"]
+            kind = row["kind"]
+            if kind not in ("group", "channel"):
+                continue
+            room = self.rooms.get(key)
+            if room is None:
+                room = Room(key, kind=kind)
+                self.rooms[key] = room
+            room.display_name = row["display_name"] or key
+            room.owner = row["owner"]
+            room.group_id = row["group_id"]
+            room.invite_token = row["invite_token"]
+            state = row.get("state") or {}
+            announcement = state.get("announcement")
+            if isinstance(announcement, dict):
+                room.announcement = announcement
+            room.polls = {}
+            for item in state.get("polls") or []:
+                if isinstance(item, dict) and item.get("poll_id"):
+                    room.polls[item["poll_id"]] = GroupPoll(**item)
+            room.files = {
+                item["file_id"]: dict(item)
+                for item in state.get("files") or []
+                if isinstance(item, dict) and item.get("file_id")
+            }
+            room.pending_invites = {
+                item["account"]: dict(item)
+                for item in state.get("pending_invites") or []
+                if isinstance(item, dict) and item.get("account")
+            }
+            if kind == "group" and room.group_id:
+                room.member_accounts = set(members.get(room.group_id, set()))
+                if room.owner:
+                    room.member_accounts.add(room.owner)
+                if room.invite_token:
+                    self.invite_tokens[room.invite_token] = key
+
+    def _persist_room(self, room: Room) -> None:
+        """保存群/频道的显示名和扩展状态。"""
+        if room.kind not in ("group", "channel"):
+            return
+        self.store.save_room(
+            room.name,
+            room.display_name,
+            room.kind,
+            room.owner,
+            room.group_id,
+            room.invite_token,
+            room.persistence_state() if room.kind == "group" else {},
+        )
 
     # ------------------------------------------------------------- 连接 ----
 
@@ -160,6 +337,7 @@ class Hub:
                 hint = f"，是不是想输入 {near}？" if near else ""
                 return False, ErrCode.UNKNOWN_ACCOUNT, f"账号不存在{hint}"
             self.cfg.account_passwords[account] = password   # 首次登录即注册
+            self.store.save_account(account, password)
         elif password != expected:
             return False, ErrCode.BAD_CREDENTIALS, "账号或密码不正确"
 
@@ -204,39 +382,124 @@ class Hub:
         if any(known.lower() == lowered for known in self.cfg.account_passwords):
             return False, ErrCode.ACCOUNT_EXISTS, "该账号已存在，请直接登录"
         self.cfg.account_passwords[account] = password
+        self.store.save_account(account, password)
         return True, None, None
 
     # ------------------------------------------------------------- 私信 ----
 
-    def record_private(self, sender: str, target: str, text: str, ts_ms: int) -> None:
-        """记录一条私信（按账号对归档，只保留最近若干条）。"""
+    def record_private(self, sender: str, target: str, text: str, ts_ms: int) -> dict:
+        """记录一条私信到 SQLite，并保留内存索引。"""
+        stored = self.store.add_message(
+            "private",
+            sender,
+            text,
+            recipient=target,
+        )
         key = tuple(sorted((sender, target)))
         box = self.private_log.setdefault(key, [])
-        box.append({"from": sender, "to": target, "text": text, "ts_ms": ts_ms})
+        box.append({
+            "message_id": stored["message_id"],
+            "from": sender,
+            "to": target,
+            "text": text,
+            "ts_ms": stored["created_at"],
+        })
         if len(box) > self.cfg.max_private_history:
             del box[: len(box) - self.cfg.max_private_history]
+        return stored
 
-    def private_history(self, account: str, peer: str) -> list[dict]:
-        """取两个账号之间的私信历史（按时间正序）。"""
-        return list(self.private_log.get(tuple(sorted((account, peer))), []))
+    def private_history(
+        self,
+        account: str,
+        peer: str,
+        before_id: int | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """取两个账号之间的私信历史（持久化、按时间正序）。"""
+        rows, _, _ = self.store.private_messages(
+            account,
+            peer,
+            before_id=before_id,
+            limit=limit or self.cfg.history_page_size,
+        )
+        return [
+            {
+                "message_id": row["id"],
+                "from": row["sender"],
+                "to": row["recipient"],
+                "text": row["text"],
+                "ts_ms": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def private_history_page(
+        self,
+        account: str,
+        peer: str,
+        before_id: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[list[dict], bool, int | None]:
+        """返回私信分页结果。"""
+        rows, has_more, next_before = self.store.private_messages(
+            account,
+            peer,
+            before_id=before_id,
+            limit=limit or self.cfg.history_page_size,
+        )
+        return (
+            [
+                {
+                    "message_id": row["id"],
+                    "from": row["sender"],
+                    "to": row["recipient"],
+                    "text": row["text"],
+                    "ts_ms": row["created_at"],
+                }
+                for row in rows
+            ],
+            has_more,
+            next_before,
+        )
 
     def conversations_of(self, account: str) -> list[dict]:
         """会话摘要列表：和谁聊过、最后一条、条数与时间（按时间倒序）。"""
-        items: list[dict] = []
-        for (a, b), messages in self.private_log.items():
-            if account not in (a, b) or not messages:
-                continue
-            peer = b if a == account else a
-            last = messages[-1]
-            items.append({
-                "peer": peer,
-                "count": len(messages),
-                "last_text": last["text"],
-                "last_from": last["from"],
-                "last_ts_ms": last["ts_ms"],
-            })
-        items.sort(key=lambda item: item["last_ts_ms"], reverse=True)
-        return items
+        return self.store.private_conversations(account)
+
+    def record_room_message(self, room: Room, sender: str, text: str) -> dict:
+        """记录房间消息并返回持久化后的元数据。"""
+        return self.store.add_message(
+            "room",
+            sender,
+            text,
+            room_key=room.name,
+        )
+
+    def room_history_page(
+        self,
+        room: Room,
+        before_id: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[list[dict], bool, int | None]:
+        """返回房间消息分页；消息体保持与协议字段一致。"""
+        rows, has_more, next_before = self.store.room_messages(
+            room.name,
+            before_id=before_id,
+            limit=limit or self.cfg.history_page_size,
+        )
+        return (
+            [
+                {
+                    "message_id": row["id"],
+                    "from": row["sender"],
+                    "text": row["text"],
+                    "ts_ms": row["created_at"],
+                }
+                for row in rows
+            ],
+            has_more,
+            next_before,
+        )
 
     def resume(self, session: "Session", token: str) -> tuple[bool, str | None, str | None]:
         """凭 token 恢复会话：昵称、房间一并恢复，并换发新 token。"""
@@ -266,10 +529,17 @@ class Hub:
         room = self.rooms[room_name]
         room.add(session)
         session.room = room.name
+        if room.kind == "group" and room.group_id and session.nickname:
+            self.store.add_group_member(room.group_id, session.nickname)
         room.broadcast(
             make(
                 "user_joined",
-                {"nickname": session.nickname, "room": room.name, "resumed": resumed},
+                {
+                    "nickname": session.nickname,
+                    "room": room.name,
+                    "room_name": room.display_name,
+                    "resumed": resumed,
+                },
             )
         )
         self.broadcast_room_users(room)
@@ -288,7 +558,11 @@ class Hub:
         if nickname and room is not None:
             room.remove(session)
             if room.table is not None:
-                room.table.on_disconnect(session)
+                # 异常掉线保留座位等待 token 重连；主动 logout 则真正离开牌桌。
+                if keep_reservation:
+                    room.table.on_disconnect(session)
+                else:
+                    room.table.leave(session)
         if nickname and self.by_nickname.get(nickname) is session:
             del self.by_nickname[nickname]
 
@@ -303,12 +577,17 @@ class Hub:
             self.reserved_names[nickname] = session.token
             room.broadcast(
                 make("user_reconnecting", {"nickname": nickname, "room": room.name,
+                                           "room_name": room.display_name,
                                            "grace_ms": self.cfg.reconnect_grace_ms}),
                 droppable=True,
             )
             self.broadcast_room_users(room)
         elif nickname and room is not None:
-            room.broadcast(make("user_left", {"nickname": nickname, "room": room.name}))
+            room.broadcast(make("user_left", {
+                "nickname": nickname,
+                "room": room.name,
+                "room_name": room.display_name,
+            }))
             self.broadcast_room_users(room)
 
         self.sessions.pop(session.conn_id, None)
@@ -324,8 +603,14 @@ class Hub:
         self.reserved_names.pop(reservation.nickname, None)
         room = self.rooms.get(reservation.room)
         if room is not None:
+            if room.table is not None:
+                room.table.drop_seat(reservation.nickname)
             room.broadcast(
-                make("user_left", {"nickname": reservation.nickname, "room": room.name})
+                make("user_left", {
+                    "nickname": reservation.nickname,
+                    "room": room.name,
+                    "room_name": room.display_name,
+                })
             )
             self.broadcast_room_users(room)
         self.broadcast_room_list()
@@ -344,11 +629,23 @@ class Hub:
 
     # ------------------------------------------------------------- 房间 ----
 
-    def join(self, session: "Session", room_name: str) -> tuple[bool, str | None, str | None]:
+    def join(
+        self,
+        session: "Session",
+        room_name: str,
+        allow_group: bool = False,
+    ) -> tuple[bool, str | None, str | None]:
         """切换房间：离开原房间、加入新房间，并广播两边的成员变化。"""
         room = self.rooms.get(room_name)
         if room is None:
             return False, ErrCode.ROOM_NOT_FOUND, f"房间 {room_name} 不存在"
+        if (
+            room.kind == "group"
+            and not allow_group
+            and not room.has_account(session.nickname)
+        ):
+            # 不向非成员暴露群是否存在
+            return False, ErrCode.ROOM_NOT_FOUND, "房间不存在"
         if session.room == room_name:
             return False, ErrCode.ALREADY_IN_ROOM, f"你已经在 {room_name}"
 
@@ -356,7 +653,11 @@ class Hub:
         if previous is not None:
             previous.remove(session)
             previous.broadcast(
-                make("user_left", {"nickname": session.nickname, "room": previous.name})
+                make("user_left", {
+                    "nickname": session.nickname,
+                    "room": previous.name,
+                    "room_name": previous.display_name,
+                })
             )
             self.broadcast_room_users(previous)
 
@@ -389,23 +690,245 @@ class Hub:
         if not picked:
             return False, ErrCode.BAD_MESSAGE, "请至少选择一位在线用户", None
 
-        self._group_seq += 1
-        room_name = f"群聊{self._group_seq}"
+        while True:
+            self._group_seq += 1
+            room_name = f"群聊{self._group_seq}"
+            if room_name not in self.rooms:
+                break
         room = Room(room_name, kind="group")
         room.owner = owner.nickname
+        room.display_name = room_name
+        room.group_id = uuid.uuid4().hex
+        room.invite_token = secrets.token_urlsafe(18)
         self.rooms[room_name] = room
+        self.invite_tokens[room.invite_token] = room_name
+        self._persist_room(room)
 
-        self.join(owner, room_name)
+        self.join(owner, room_name, allow_group=True)
         for name in picked:
             member = self.by_nickname.get(name)
             if member is not None:
-                self.join(member, room_name)
+                self.join(member, room_name, allow_group=True)
 
         room.broadcast(make("group_created", {
-            "room": room_name, "owner": owner.nickname, "members": room.nicknames(),
+            "room": room_name,
+            "room_name": room.display_name,
+            "group_id": room.group_id,
+            "owner": owner.nickname,
+            "members": room.nicknames(),
         }))
         self.broadcast_room_list()
         return True, None, None, room_name
+
+    def rename_group(self, session: "Session", display_name: str) -> tuple[bool, str | None, str | None]:
+        """群主修改群显示名；显示名允许重复，内部 name 不变。"""
+        room = self.group_of(session)
+        if room is None:
+            return False, ErrCode.NOT_IN_ROOM, "请先进入一个群聊"
+        if room.owner != session.nickname:
+            return False, ErrCode.NOT_GROUP_OWNER, "只有群主可以修改群名"
+        display_name = display_name.strip()
+        if not display_name:
+            return False, ErrCode.BAD_MESSAGE, "群名不能为空"
+        if len(display_name) > 32:
+            return False, ErrCode.BAD_MESSAGE, "群名不能超过 32 个字符"
+        room.display_name = display_name
+        room.broadcast(make("group_renamed", {
+            "room": room.name,
+            "room_name": room.display_name,
+            "group_id": room.group_id,
+        }))
+        self._persist_room(room)
+        self.broadcast_room_list()
+        return True, None, None
+
+    def create_channel(
+        self,
+        session: "Session",
+        display_name: str,
+    ) -> tuple[bool, str | None, str | None, str | None]:
+        """管理员创建公共频道；频道名可以重复，内部使用独立 room_key。"""
+        if session.nickname != PUBLIC_CHANNEL_ADMIN:
+            return False, ErrCode.NOT_CHANNEL_ADMIN, "只有 wanjia1 可以创建公共频道", None
+        display_name = display_name.strip()
+        if not display_name:
+            return False, ErrCode.BAD_MESSAGE, "频道名不能为空", None
+        if len(display_name) > 32:
+            return False, ErrCode.BAD_MESSAGE, "频道名不能超过 32 个字符", None
+        room_key = f"channel:{uuid.uuid4().hex[:12]}"
+        room = Room(room_key, kind="channel")
+        room.display_name = display_name
+        room.owner = PUBLIC_CHANNEL_ADMIN
+        self.rooms[room_key] = room
+        self._persist_room(room)
+        self.broadcast_room_list()
+        return True, None, None, room_key
+
+    def request_join_by_invite(
+        self, session: "Session", token: str
+    ) -> tuple[bool, str | None, str | None, str | None, bool]:
+        """扫码后申请加入群聊，等待群主审批。"""
+        room_name = self.invite_tokens.get(token)
+        if room_name is None:
+            return False, ErrCode.GROUP_NOT_FOUND, "邀请二维码已失效", None, False
+        room = self.rooms.get(room_name)
+        if room is None or room.kind != "group":
+            return False, ErrCode.GROUP_NOT_FOUND, "群聊不存在", None, False
+        if room.has_account(session.nickname):
+            return True, None, None, room_name, False
+        self._queue_group_invite(
+            room,
+            session.nickname,
+            requested_by="扫码申请",
+            source="qr",
+            notify_target=False,
+        )
+        return True, None, None, room_name, True
+
+    def _queue_group_invite(
+        self,
+        room: Room,
+        account: str,
+        requested_by: str,
+        source: str,
+        notify_target: bool = True,
+    ) -> None:
+        """加入待群主审批的邀请队列并通知群主。"""
+        item = {
+            "account": account,
+            "requested_by": requested_by,
+            "source": source,
+            "requested_at_ms": now_ms(),
+        }
+        room.pending_invites[account] = item
+        self._persist_room(room)
+        owner = self.by_nickname.get(room.owner)
+        if owner is not None:
+            owner.send(make("group_invite_requested", {
+                "room": room.name,
+                "room_name": room.display_name,
+                "group_id": room.group_id,
+                **item,
+            }))
+            self.send_group_state(owner)
+        target = self.by_nickname.get(account)
+        if notify_target and target is not None:
+            target.send(make("group_invite_pending", {
+                "room": room.name,
+                "room_name": room.display_name,
+                "group_id": room.group_id,
+                **item,
+            }))
+
+    def invite_group_members(
+        self,
+        session: "Session",
+        members: list[str],
+    ) -> tuple[bool, str | None, str | None]:
+        """群成员邀请非成员，申请由群主审批。"""
+        room = self.group_of(session)
+        if room is None:
+            return False, ErrCode.NOT_IN_ROOM, "请先进入一个群聊"
+        added = 0
+        for name in members:
+            if not isinstance(name, str) or not name:
+                continue
+            if room.has_account(name) or name == session.nickname:
+                continue
+            target = self.by_nickname.get(name)
+            if target is None:
+                return False, ErrCode.USER_NOT_FOUND, f"{name} 当前不在线"
+            self._queue_group_invite(
+                room,
+                name,
+                requested_by=session.nickname,
+                source="member",
+            )
+            added += 1
+        if added == 0:
+            return False, ErrCode.BAD_MESSAGE, "请选择未入群的在线玩家"
+        return True, None, None
+
+    def approve_group_invite(
+        self, session: "Session", account: str
+    ) -> tuple[bool, str | None, str | None]:
+        """群主批准邀请，将目标用户加入当前群。"""
+        room = self.group_of(session)
+        if room is None:
+            return False, ErrCode.NOT_IN_ROOM, "请先进入一个群聊"
+        if room.owner != session.nickname:
+            return False, ErrCode.NOT_GROUP_OWNER, "只有群主可以审批入群申请"
+        item = room.pending_invites.pop(account, None)
+        if item is None:
+            return False, ErrCode.USER_NOT_FOUND, "没有找到该入群申请"
+        target = self.by_nickname.get(account)
+        if target is None:
+            return False, ErrCode.USER_NOT_FOUND, f"{account} 当前不在线"
+        ok, code, message = self.join(target, room.name, allow_group=True)
+        if not ok:
+            return False, code, message
+        target.send(make("joined", {
+            "room": room.name,
+            "room_key": room.name,
+            "room_name": room.display_name,
+            "users": room.nicknames(),
+            "role": "player",
+            "owner": room.owner,
+            "group_id": room.group_id,
+        }))
+        messages, has_more, next_before = self.room_history_page(room)
+        target.send(make("room_history", {
+            "room": room.name,
+            "room_name": room.display_name,
+            "messages": messages,
+            "has_more": has_more,
+            "next_before": next_before,
+        }))
+        self._persist_room(room)
+        self.send_group_state(target)
+        owner = self.by_nickname.get(room.owner)
+        if owner is not None:
+            self.send_group_state(owner)
+        self.broadcast_room_list()
+        return True, None, None
+
+    def reject_group_invite(
+        self, session: "Session", account: str
+    ) -> tuple[bool, str | None, str | None]:
+        """群主拒绝入群申请。"""
+        room = self.group_of(session)
+        if room is None:
+            return False, ErrCode.NOT_IN_ROOM, "请先进入一个群聊"
+        if room.owner != session.nickname:
+            return False, ErrCode.NOT_GROUP_OWNER, "只有群主可以审批入群申请"
+        item = room.pending_invites.pop(account, None)
+        if item is None:
+            return False, ErrCode.USER_NOT_FOUND, "没有找到该入群申请"
+        target = self.by_nickname.get(account)
+        if target is not None:
+            target.send(make("group_invite_rejected", {
+                "room": room.name,
+                "room_name": room.display_name,
+                "group_id": room.group_id,
+                "account": account,
+            }))
+        self._persist_room(room)
+        self.send_group_state(session)
+        return True, None, None
+
+    def group_of(self, session: "Session") -> Room | None:
+        room = self.room_of(session)
+        return room if room is not None and room.kind == "group" else None
+
+    def send_group_state(self, session: "Session") -> None:
+        room = self.group_of(session)
+        if room is not None and session.nickname:
+            session.send(make("group_state", room.group_state(session.nickname)))
+
+    def broadcast_group_state(self, room: Room) -> None:
+        for member in list(room.members.values()):
+            if member.nickname:
+                member.send(make("group_state", room.group_state(member.nickname)))
 
     def delete_group(self, session: "Session", room_name: str) -> tuple[bool, str | None, str | None]:
         """解散群聊（仅群主）：成员回到大厅，房间被移除。"""
@@ -415,12 +938,187 @@ class Hub:
         if room.owner != session.nickname:
             return False, ErrCode.NOT_GROUP_OWNER, "只有群主可以解散群聊"
 
-        room.broadcast(make("group_deleted", {"room": room_name, "owner": session.nickname}),
+        room.broadcast(make("group_deleted", {
+            "room": room_name,
+            "room_name": room.display_name,
+            "owner": session.nickname,
+        }),
                        droppable=True)
+        if room.invite_token:
+            self.invite_tokens.pop(room.invite_token, None)
         for member in list(room.members.values()):
             self.join(member, self.cfg.lobby_room)
         self.rooms.pop(room_name, None)
+        self.store.delete_room(room_name, room.group_id)
         self.broadcast_room_list()
+        return True, None, None
+
+    def set_announcement(self, session: "Session", text: str) -> tuple[bool, str | None, str | None]:
+        room = self.group_of(session)
+        if room is None:
+            return False, ErrCode.NOT_IN_ROOM, "请先进入一个群聊"
+        if room.owner != session.nickname:
+            return False, ErrCode.NOT_GROUP_OWNER, "只有群主可以修改群公告"
+        text = text.strip()
+        if len(text) > 1000:
+            return False, ErrCode.MESSAGE_TOO_LONG, "群公告不能超过 1000 个字符"
+        room.announcement = {
+            "text": text,
+            "updated_by": session.nickname,
+            "updated_at_ms": now_ms(),
+            "revision": int(room.announcement.get("revision", 0)) + 1,
+        }
+        self._persist_room(room)
+        room.broadcast(make("announcement_updated", {
+            "room": room.name,
+            "announcement": dict(room.announcement),
+        }))
+        return True, None, None
+
+    def create_poll(
+        self,
+        session: "Session",
+        title: str,
+        options: list[str],
+        deadline_ms: int | None = None,
+        anonymous: bool = False,
+    ) -> tuple[bool, str | None, str | None, GroupPoll | None]:
+        room = self.group_of(session)
+        if room is None:
+            return False, ErrCode.NOT_IN_ROOM, "请先进入一个群聊", None
+        if room.owner != session.nickname:
+            return False, ErrCode.NOT_GROUP_OWNER, "只有群主可以发起群投票", None
+        title = title.strip()
+        cleaned = [item.strip() for item in options if isinstance(item, str) and item.strip()]
+        if not title:
+            return False, ErrCode.BAD_MESSAGE, "投票标题不能为空", None
+        if not 2 <= len(cleaned) <= 10:
+            return False, ErrCode.BAD_MESSAGE, "投票选项需要 2 到 10 个", None
+        if deadline_ms is not None and deadline_ms <= now_ms():
+            return False, ErrCode.BAD_MESSAGE, "投票截止时间必须晚于当前时间", None
+        poll = GroupPoll(
+            poll_id=secrets.token_hex(6),
+            title=title,
+            options=[
+                {"id": f"o{index + 1}", "text": item}
+                for index, item in enumerate(cleaned)
+            ],
+            created_by=session.nickname,
+            created_at_ms=now_ms(),
+            deadline_ms=deadline_ms,
+            anonymous=anonymous,
+        )
+        room.polls[poll.poll_id] = poll
+        self._persist_room(room)
+        self.broadcast_group_state(room)
+        return True, None, None, poll
+
+    def vote_poll(
+        self,
+        session: "Session",
+        poll_id: str,
+        option_id: str,
+    ) -> tuple[bool, str | None, str | None]:
+        room = self.group_of(session)
+        if room is None:
+            return False, ErrCode.NOT_IN_ROOM, "请先进入一个群聊"
+        poll = room.polls.get(poll_id)
+        if poll is None:
+            return False, ErrCode.POLL_NOT_FOUND, "投票不存在"
+        if poll.closed():
+            return False, ErrCode.POLL_CLOSED, "投票已经结束"
+        if option_id not in {option["id"] for option in poll.options}:
+            return False, ErrCode.BAD_MESSAGE, "投票选项不存在"
+        poll.votes[session.nickname] = option_id
+        self._persist_room(room)
+        self.broadcast_group_state(room)
+        return True, None, None
+
+    def close_poll(self, session: "Session", poll_id: str) -> tuple[bool, str | None, str | None]:
+        room = self.group_of(session)
+        if room is None:
+            return False, ErrCode.NOT_IN_ROOM, "请先进入一个群聊"
+        if room.owner != session.nickname:
+            return False, ErrCode.NOT_GROUP_OWNER, "只有群主可以结束投票"
+        poll = room.polls.get(poll_id)
+        if poll is None:
+            return False, ErrCode.POLL_NOT_FOUND, "投票不存在"
+        poll.closed_at_ms = now_ms()
+        self._persist_room(room)
+        self.broadcast_group_state(room)
+        return True, None, None
+
+    def sweep_group_polls(self) -> int:
+        """把到达截止时间的投票标记为结束。"""
+        now = now_ms()
+        changed_rooms: list[Room] = []
+        for room in self.rooms.values():
+            if room.kind != "group":
+                continue
+            changed = False
+            for poll in room.polls.values():
+                if (
+                    poll.closed_at_ms is None
+                    and poll.deadline_ms is not None
+                    and poll.deadline_ms <= now
+                ):
+                    poll.closed_at_ms = now
+                    self._persist_room(room)
+                    changed = True
+            if changed:
+                changed_rooms.append(room)
+        for room in changed_rooms:
+            self.broadcast_group_state(room)
+        return len(changed_rooms)
+
+    def register_group_file(
+        self,
+        session: "Session",
+        group_id: str,
+        file_id: str,
+        name: str,
+        mime: str,
+        size: int,
+        kind: str,
+    ) -> tuple[bool, str | None, str | None]:
+        room = self.group_of(session)
+        if room is None or room.group_id != group_id:
+            return False, ErrCode.NOT_IN_ROOM, "当前账号不在目标群聊"
+        if not file_id or not name or size < 0:
+            return False, ErrCode.BAD_MESSAGE, "文件元数据不合法"
+        if file_id in room.files:
+            return True, None, None
+        room.files[file_id] = {
+            "file_id": file_id,
+            "name": name[:255],
+            "mime": mime[:100],
+            "size": size,
+            "kind": "image" if kind == "image" else "file",
+            "uploader": session.nickname,
+            "created_at_ms": now_ms(),
+        }
+        self._persist_room(room)
+        room.broadcast(make("group_file_added", {
+            "group_id": group_id,
+            **room.files[file_id],
+        }))
+        return True, None, None
+
+    def delete_group_file(self, session: "Session", file_id: str) -> tuple[bool, str | None, str | None]:
+        room = self.group_of(session)
+        if room is None:
+            return False, ErrCode.NOT_IN_ROOM, "请先进入一个群聊"
+        item = room.files.get(file_id)
+        if item is None:
+            return False, ErrCode.FILE_NOT_FOUND, "文件不存在"
+        if item["uploader"] != session.nickname and room.owner != session.nickname:
+            return False, ErrCode.NOT_GROUP_OWNER, "只有上传者或群主可以删除文件"
+        room.files.pop(file_id, None)
+        self._persist_room(room)
+        room.broadcast(make("group_file_deleted", {
+            "group_id": room.group_id,
+            "file_id": file_id,
+        }))
         return True, None, None
 
     def groups_of(self, session: "Session") -> list[dict]:
@@ -434,20 +1132,33 @@ class Hub:
     # ------------------------------------------------------------- 推送 ----
 
     def room_list(self) -> list[dict]:
-        """房间摘要列表，客户端大厅直接展示。"""
+        """全局房间摘要（测试和管理使用）。"""
         return [room.snapshot() for room in self.rooms.values()]
 
+    def room_list_for(self, session: "Session") -> list[dict]:
+        """按账号权限返回房间；群聊只对群成员可见。"""
+        return [
+            room.snapshot()
+            for room in self.rooms.values()
+            if room.kind != "group" or room.has_account(session.nickname)
+        ]
+
     def broadcast_room_list(self) -> None:
-        """把房间列表推给所有已登录会话。"""
-        payload = make("room_list", {"rooms": self.room_list()})
+        """按每个会话的群成员权限推送房间列表。"""
         for session in list(self.sessions.values()):
             if session.nickname:
-                session.send(payload)
+                session.send(make("room_list", {
+                    "rooms": self.room_list_for(session),
+                }))
 
     def broadcast_room_users(self, room: Room) -> None:
         """把某房间的成员列表推给该房间成员。"""
         room.broadcast(
-            make("room_users", {"room": room.name, "users": room.nicknames()}),
+            make("room_users", {
+                "room": room.name,
+                "room_name": room.display_name,
+                "users": room.nicknames(),
+            }),
             droppable=True,
         )
 

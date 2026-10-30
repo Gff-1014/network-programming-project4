@@ -75,7 +75,10 @@ class Settings:
         "wanjia5": "123456",
     })
     auto_register: bool = _env_int("DDZ_AUTO_REGISTER", 0) == 1
-    # 私信历史（仅内存，服务端重启即清空）：每个会话最多保留多少条
+    # SQLite 持久化文件；测试会覆盖成临时数据库
+    db_path: str = _env_str("DDZ_DB_PATH", "data/app.db")
+    history_page_size: int = _env_int("DDZ_HISTORY_PAGE_SIZE", 50)
+    # 私信历史保留上限（仅保留最近消息）
     max_private_history: int = _env_int("DDZ_MAX_PRIVATE_HISTORY", 300)
 
     def __post_init__(self) -> None:
@@ -88,6 +91,11 @@ class Settings:
     chat_rooms: tuple[str, ...] = ("聊天房",)
     # 牌桌：三人一桌，其余人可作观战
     table_rooms: tuple[str, ...] = ("牌桌1", "牌桌2", "牌桌3")
+    public_channels: tuple[str, ...] = (
+        "公共频道·综合",
+        "公共频道·技术",
+        "公共频道·闲聊",
+    )
     seats_per_table: int = _env_int("DDZ_SEATS_PER_TABLE", 3)
     max_spectators: int = _env_int("DDZ_MAX_SPECTATORS", 2)
     # 断线托管：轮到自己后多久自动出牌（毫秒）

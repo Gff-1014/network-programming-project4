@@ -32,7 +32,7 @@ class FakeWriter:
 
 
 def make_session(cfg, hub=None) -> Session:
-    hub = hub or Hub(cfg)
+    hub = hub or Hub(dataclasses.replace(cfg, db_path=":memory:"))
     session = Session("c0001", None, FakeWriter(), hub, cfg)  # type: ignore[arg-type]
     session.nickname = "queue-user"
     return session

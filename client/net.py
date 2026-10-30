@@ -188,9 +188,20 @@ class Connection:
         """拉取私信会话摘要。"""
         return await self.request("list_conversations", {}, timeout)
 
-    async def get_history(self, peer: str, timeout: float = 5.0) -> dict:
-        """拉取与某人的私信历史。"""
-        return await self.request("get_history", {"peer": peer}, timeout)
+    async def get_history(
+        self,
+        peer: str,
+        before_id: int | None = None,
+        limit: int | None = None,
+        timeout: float = 5.0,
+    ) -> dict:
+        """拉取与某人的私信历史，可分页。"""
+        data = {"peer": peer}
+        if before_id is not None:
+            data["before_id"] = before_id
+        if limit is not None:
+            data["limit"] = limit
+        return await self.request("get_history", data, timeout)
 
     async def create_group(self, members: list[str], timeout: float = 5.0) -> dict:
         """邀请在线用户建群。"""

@@ -24,8 +24,10 @@ class ClientSession:
         self.nickname: str | None = None
         self.token: str | None = None
         self.room: str | None = None
+        self.room_name: str | None = None
         self.role: str | None = None
         self.rooms: list[dict] = []
+        self.group_state: dict[str, Any] = {}
         self.room_users: list[str] = []
         self.online_users: list[str] = []
         self.conversations: list[dict] = []
@@ -33,6 +35,9 @@ class ClientSession:
         self.current_peer: str | None = None
         self.hand: list[int] = []
         self.table: dict[str, Any] = {}
+        self.room_history: list[dict] = []
+        self.room_history_has_more = False
+        self.room_history_next_before: int | None = None
         self.auto_play = False
         self.log: list[str] = []
         self.error: str | None = None
@@ -102,7 +107,9 @@ class ClientSession:
         self.nickname = data.get("nickname") or self.account
         self.token = data.get("token")
         self.room = data.get("room")
+        self.room_name = data.get("room_name") or self.room
         self.rooms = data.get("rooms", [])
+        self.group_state = {}
         self.role = "player"
         return data
 
@@ -120,9 +127,34 @@ class ClientSession:
             return
         self.current_peer = peer
         reply = await self.conn.get_history(peer)
-        self.private_history[peer] = list(reply["data"].get("messages") or [])
-        self.on_event("private_opened", {"peer": peer,
-                                         "messages": self.private_history[peer]})
+        data = reply["data"]
+        self.private_history[peer] = list(data.get("messages") or [])
+        self.on_event("private_opened", {
+            "peer": peer,
+            "messages": self.private_history[peer],
+            "has_more": bool(data.get("has_more")),
+            "next_before": data.get("next_before"),
+        })
+
+    async def load_room_history(self, before_id: int | None = None) -> None:
+        """加载当前房间更早的一页消息。"""
+        if self.conn is None or self._closed or not self.room:
+            return
+        reply = await self.conn.request("room_history", {
+            "room": self.room,
+            "before_id": before_id,
+        })
+        self.on_event("room_history", reply.get("data") or {})
+
+    async def load_private_history(self, peer: str, before_id: int | None = None) -> None:
+        """加载与某人的更早私信。"""
+        if self.conn is None or self._closed:
+            return
+        reply = await self.conn.request("get_history", {
+            "peer": peer,
+            "before_id": before_id,
+        })
+        self.on_event("private_history_more", reply.get("data") or {})
 
     async def send_private(self, text: str) -> None:
         """给当前私聊对象发消息，并刷新会话列表。"""
@@ -144,12 +176,18 @@ class ClientSession:
         self.nickname = None
         self.token = None
         self.room = None
+        self.room_name = None
         self.role = None
         self.hand = []
         self.table = {}
+        self.group_state = {}
         self.room_users = []
+        self.room_history = []
+        self.room_history_has_more = False
+        self.room_history_next_before = None
         self.auto_play = False
         self.rooms = []
+        self.group_state = {}
         self.on_event("logged_out", {})
 
     async def create_group(self, members: list[str]) -> str:
@@ -161,10 +199,120 @@ class ClientSession:
                                         "members": members + [self.nickname or ""]})
         return room
 
+    async def create_channel(self, name: str) -> dict:
+        """管理员创建公共频道。"""
+        assert self.conn is not None
+        reply = await self.conn.request("create_channel", {"name": name})
+        data = reply["data"]
+        self.on_event("channel_created", data)
+        return data
+
     async def delete_group(self, room: str) -> None:
         """解散当前群聊。"""
         assert self.conn is not None
         await self.conn.delete_group(room)
+
+    async def rename_group(self, name: str) -> None:
+        """群主修改当前群显示名。"""
+        assert self.conn is not None
+        await self.conn.request("rename_group", {"name": name})
+
+    async def join_invite(self, token: str) -> dict:
+        """凭群二维码 token 加入群聊。"""
+        assert self.conn is not None
+        reply = await self.conn.request("join_invite", {"token": token})
+        data = reply["data"]
+        if reply.get("type") == "group_invite_pending":
+            self.on_event("group_invite_pending", data)
+            return data
+        self.room = data.get("room", self.room)
+        self.room_name = data.get("room_name") or self.room
+        self.role = data.get("role", "player")
+        self.on_event("joined", data)
+        return data
+
+    async def invite_group_members(self, members: list[str]) -> None:
+        """群成员邀请未入群玩家，等待群主审批。"""
+        assert self.conn is not None
+        await self.conn.request("invite_group_member", {"members": members})
+
+    async def approve_group_invite(self, account: str) -> None:
+        """群主批准入群申请。"""
+        assert self.conn is not None
+        await self.conn.request("approve_group_invite", {"account": account})
+
+    async def reject_group_invite(self, account: str) -> None:
+        """群主拒绝入群申请。"""
+        assert self.conn is not None
+        await self.conn.request("reject_group_invite", {"account": account})
+
+    async def refresh_group_state(self) -> None:
+        """拉取当前群的公告、投票和文件快照。"""
+        if self.conn is None or self._closed:
+            return
+        await self.conn.send("group_state", {})
+
+    async def set_announcement(self, text: str) -> None:
+        """群主更新群公告。"""
+        assert self.conn is not None
+        await self.conn.request("set_announcement", {"text": text})
+
+    async def create_poll(
+        self,
+        title: str,
+        options: list[str],
+        deadline_minutes: int | None = None,
+        anonymous: bool = False,
+    ) -> dict:
+        """群主创建单选投票。"""
+        assert self.conn is not None
+        data: dict[str, Any] = {
+            "title": title,
+            "options": options,
+            "anonymous": anonymous,
+        }
+        if deadline_minutes is not None:
+            data["deadline_minutes"] = deadline_minutes
+        reply = await self.conn.request("poll_create", data)
+        return reply.get("data", {})
+
+    async def vote_poll(self, poll_id: str, option_id: str) -> None:
+        """给群投票投一票。"""
+        assert self.conn is not None
+        await self.conn.request("poll_vote", {
+            "poll_id": poll_id,
+            "option_id": option_id,
+        })
+
+    async def close_poll(self, poll_id: str) -> None:
+        """群主结束投票。"""
+        assert self.conn is not None
+        await self.conn.request("poll_close", {"poll_id": poll_id})
+
+    async def register_group_file(
+        self,
+        group_id: str,
+        file_id: str,
+        name: str,
+        mime: str,
+        size: int,
+        kind: str,
+    ) -> None:
+        """登记网页网关已经保存的群文件元数据。"""
+        assert self.conn is not None
+        await self.conn.request("group_file_register", {
+            "group_id": group_id,
+            "file_id": file_id,
+            "name": name,
+            "mime": mime,
+            "size": size,
+            "kind": kind,
+        })
+
+    async def delete_group_file(self, file_id: str) -> None:
+        """删除当前群的群文件元数据。"""
+        assert self.conn is not None
+        await self.conn.request("group_file_delete", {"file_id": file_id})
 
     async def refresh_rooms(self) -> None:
         """拉取房间列表。"""
@@ -190,8 +338,13 @@ class ClientSession:
             raise RuntimeError("尚未连接服务器")
         reply = await self.conn.join_room(room)
         self.room = room
+        self.room_name = reply["data"].get("room_name") or room
         self.role = reply["data"].get("role", "player")
-        self.on_event("joined", {"room": room, "role": self.role})
+        self.on_event("joined", {
+            "room": room,
+            "room_name": self.room_name,
+            "role": self.role,
+        })
         return reply["data"]
 
     async def spectate(self, room: str) -> dict:
@@ -199,8 +352,13 @@ class ClientSession:
         assert self.conn is not None
         reply = await self.conn.request("spectate", {"room": room})
         self.room = room
+        self.room_name = reply["data"].get("room_name") or room
         self.role = "spectator"
-        self.on_event("joined", {"room": room, "role": self.role})
+        self.on_event("joined", {
+            "room": room,
+            "room_name": self.room_name,
+            "role": self.role,
+        })
         return reply["data"]
 
     async def leave_room(self) -> None:
@@ -208,11 +366,15 @@ class ClientSession:
         assert self.conn is not None
         reply = await self.conn.leave_room()
         self.room = reply["data"].get("to")   # 服务端会把人放回大厅
+        self.room_name = reply["data"].get("to_name") or self.room
         self.role = "player"
         self.hand = []
         self.table = {}
         self.room_users = []
-        self.on_event("left", {"room": self.room})
+        self.on_event("left", {
+            "room": self.room,
+            "room_name": self.room_name,
+        })
 
     async def say(self, text: str) -> None:
         """发送房间消息。"""
@@ -278,6 +440,15 @@ class ClientSession:
         line: str | None = None
         if kind == "room_list":
             self.rooms = data.get("rooms", [])
+        elif kind == "room_history":
+            self.room_history = list(data.get("messages") or [])
+            self.room_history_has_more = bool(data.get("has_more"))
+            self.room_history_next_before = data.get("next_before")
+        elif kind == "group_state":
+            self.group_state = data
+            self.room = data.get("room", self.room)
+            self.room_name = data.get("room_name") or self.room_name or self.room
+            self.role = "player"
         elif kind == "room_users":
             if data.get("room") == self.room:
                 self.room_users = list(data.get("users", []))
@@ -285,14 +456,62 @@ class ClientSession:
             self.room_users = list(data.get("users") or [])
             self.online_users = list(data.get("online") or [])
         elif kind == "joined":
+            self.room = data.get("room", self.room)
+            self.room_name = data.get("room_name") or self.room_name or self.room
             self.role = data.get("role", self.role)
+            self.room_history = []
+            self.room_history_has_more = False
+            self.room_history_next_before = None
         elif kind == "group_created":
             room = data.get("room")
             self.room = room
+            self.room_name = data.get("room_name") or self.room_name or room
             self.role = "player"
             line = f"[群聊] {data.get('owner')} 创建了 {room}，成员：{'、'.join(data.get('members') or [])}"
+        elif kind == "channel_created":
+            line = f"[频道] {data.get('owner')} 创建了 {data.get('room_name')}"
         elif kind == "group_deleted":
+            self.room = "大厅"
+            self.room_name = "大厅"
+            self.role = "player"
             line = f"[群聊] {data.get('owner')} 解散了 {data.get('room')}"
+        elif kind == "group_renamed":
+            self.room = data.get("room", self.room)
+            self.room_name = data.get("room_name") or self.room_name
+            line = f"[群聊] 群名已改为 {self.room_name}"
+        elif kind == "group_invite_requested":
+            line = f"[群申请] {data.get('account')} 申请加入 {data.get('room_name')}"
+        elif kind == "group_invite_pending":
+            line = f"[群申请] 已申请加入 {data.get('room_name')}，等待群主审核"
+        elif kind == "group_invite_rejected":
+            line = f"[群申请] 加入 {data.get('room_name')} 的申请被拒绝"
+        elif kind == "announcement_updated":
+            announcement = data.get("announcement") or {}
+            self.group_state["announcement"] = announcement
+            line = f"[群公告] {announcement.get('text') or '（已清空）'}"
+        elif kind in ("poll_created", "poll_updated", "poll_closed"):
+            poll = data.get("poll")
+            if poll:
+                polls = self.group_state.setdefault("polls", [])
+                for index, item in enumerate(polls):
+                    if item.get("poll_id") == poll.get("poll_id"):
+                        polls[index] = poll
+                        break
+                else:
+                    polls.append(poll)
+            line = f"[群投票] {data.get('title') or '投票状态已更新'}"
+        elif kind == "group_file_added":
+            files = self.group_state.setdefault("files", [])
+            if not any(item.get("file_id") == data.get("file_id") for item in files):
+                files.append(dict(data))
+            line = f"[群文件] {data.get('uploader')} 上传了 {data.get('name')}"
+        elif kind == "group_file_deleted":
+            files = self.group_state.setdefault("files", [])
+            self.group_state["files"] = [
+                item for item in files
+                if item.get("file_id") != data.get("file_id")
+            ]
+            line = "[群文件] 文件已删除"
         elif kind == "logged_out":
             line = "[账号] 已登出"
         elif kind == "conversations":
@@ -335,7 +554,7 @@ class ClientSession:
             self.table["table_owner"] = None
             line = f"[一轮结束] {data.get('leader')} 重新领出"
         elif kind == "timeout":
-            line = f"[托管] {data.get('player')} 超时未出 → {data.get('action')}"
+            line = f"[托管] {data.get('player')} 自动行动 → {data.get('action')}"
         elif kind == "game_over":
             scores = data.get("scores") or {}
             mine = scores.get(self.nickname, 0)

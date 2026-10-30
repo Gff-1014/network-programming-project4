@@ -4,4 +4,10 @@ __pycache__/
 .pytest_cache/
 _vendor/
 data/*.jsonl
+data/uploads/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+logs/
+$null
 .env

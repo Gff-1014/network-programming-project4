@@ -26,13 +26,14 @@ class ServerHandle:
 
 
 @pytest_asyncio.fixture
-async def server_factory():
+async def server_factory(tmp_path):
     """启动服务端工厂：`await server_factory(handshake_timeout_ms=200)`。"""
     started: list[asyncio.AbstractServer] = []
     handles: list[ServerHandle] = []
     sweepers: list[asyncio.Task] = []
 
     async def start(**overrides) -> ServerHandle:
+        overrides.setdefault("db_path", str(tmp_path / "app.db"))
         # 测试里用到的账号名很多，默认打开"首次登录即注册"，
         # 生产/演示默认是严格模式（只认预置账号 + DDZ_EXTRA_ACCOUNTS）。
         overrides.setdefault("auto_register", True)

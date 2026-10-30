@@ -9,7 +9,7 @@ from __future__ import annotations
 import queue
 import os
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 from game import ai
 from game.text import parse_card
@@ -207,7 +207,7 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
         if session.nickname:
             bits.append(f"{session.nickname}")
         if session.room:
-            bits.append(f"房间 {session.room}")
+            bits.append(f"房间 {session.room_name or session.room}")
         if session.table.get("state"):
             bits.append(f"对局 {session.table['state']}")
         if session.hand:
@@ -333,6 +333,27 @@ class ChatApp(ui_ctk.root_class() if UI_CTK_ENABLED else tk.Tk):  # [UI-CTK]
         if picked:
             self.call(self.session.create_group(picked), "创建群聊失败")
 
+    def do_create_channel(self) -> None:
+        """公共频道管理员创建频道；服务端会再次校验账号权限。"""
+        if self.session.nickname != "wanjia1":
+            messagebox.showinfo("提示", "只有 wanjia1 可以创建公共频道")
+            return
+        name = simpledialog.askstring(
+            "创建公共频道",
+            "输入频道名称（最多 32 个字符）：",
+            parent=self,
+        )
+        if name is None:
+            return
+        name = name.strip()
+        if not name:
+            messagebox.showinfo("提示", "频道名称不能为空")
+            return
+        if len(name) > 32:
+            messagebox.showinfo("提示", "频道名称不能超过 32 个字符")
+            return
+        self.call(self.session.create_channel(name), "创建频道失败")
+
     def do_refresh_users(self) -> None:
         """手动刷新在线玩家（广播偶尔会错过，留一个手动入口）。"""
         self.call(self.session.refresh_users(), "刷新在线玩家失败")
@@ -447,6 +468,9 @@ class LobbyFrame(BaseFrame):
         ttk.Label(header, text="大厅", font=FONT_TITLE).pack(side="left")
         self.account_var_display = tk.StringVar(value="当前账号：-")
         ttk.Label(header, textvariable=self.account_var_display, font=FONT_UI).pack(side="left", padx=16)
+        self.btn_create_channel = ttk.Button(
+            header, text="+ 频道", command=app.do_create_channel
+        )
         ttk.Button(header, text="登出账号", command=app.do_logout).pack(side="right")
 
         body = ttk.Frame(self)
@@ -455,6 +479,7 @@ class LobbyFrame(BaseFrame):
         left = ttk.LabelFrame(body, text="房间", padding=8)
         left.pack(side="left", fill="both", expand=True)
         self.room_list = tk.Listbox(left, font=FONT_UI, height=12)
+        self._room_keys: list[str] = []
         self.room_list.pack(fill="both", expand=True)
         ttk.Button(left, text="进入选中房间", command=self._join_selected).pack(fill="x", pady=(8, 0))
         ttk.Button(left, text="刷新", command=self._refresh).pack(fill="x", pady=4)
@@ -490,6 +515,10 @@ class LobbyFrame(BaseFrame):
 
     def on_show(self) -> None:
         self.account_var_display.set(f"当前账号：{self.app.session.account or '-'}")
+        if self.app.session.nickname == "wanjia1":
+            self.btn_create_channel.pack(side="right", padx=(0, 8))
+        else:
+            self.btn_create_channel.pack_forget()
         self._refresh()
         self._render_conversations()
         self.app.call(self.app.session.refresh_users(), "刷新在线玩家失败")
@@ -510,15 +539,17 @@ class LobbyFrame(BaseFrame):
         if not selection:
             messagebox.showinfo("提示", "请先选择一个房间")
             return
-        text = self.room_list.get(selection[0])
-        self.app.do_join(text.split("（")[0])
+        self.app.do_join(self._room_keys[selection[0]])
 
     def on_event(self, kind: str, data: dict) -> None:
         if kind == "room_list":
             self.room_list.delete(0, tk.END)
+            self._room_keys = []
             for room in data.get("rooms", []):
                 kind_label = {"lobby": "大厅", "chat": "聊天", "doudizhu": "牌桌",
-                              "group": "群聊"}.get(room.get("kind"), room.get("kind"))
+                              "group": "群聊", "channel": "公共频道"}.get(
+                                  room.get("kind"), room.get("kind"))
+                self._room_keys.append(room.get("room_key", room["name"]))
                 self.room_list.insert(tk.END, f"{room['name']}（{kind_label}・{room['count']} 人）")
         elif kind == "room_users":
             if data.get("room") == self.app.session.room:
@@ -548,6 +579,7 @@ class RoomFrame(BaseFrame):
         self.group_var = tk.StringVar(value="")
         ttk.Label(header, textvariable=self.group_var, font=FONT_UI).pack(side="left", padx=12)
         ttk.Button(header, text="离开房间", command=app.do_leave).pack(side="right")
+        self.btn_rename = ttk.Button(header, text="修改群名", command=self._rename_group)
         self.btn_dismiss = ttk.Button(header, text="解散群聊", command=app.do_delete_group)
 
         body = ttk.Frame(self)
@@ -573,25 +605,43 @@ class RoomFrame(BaseFrame):
         self.app.do_whisper(target)
 
     def on_show(self) -> None:
-        self.title_var.set(f"聊天房 - {self.app.session.room}")
+        self.title_var.set(f"聊天房 - {self.app.session.room_name or self.app.session.room}")
         self._sync_group_controls()
         self.refresh_users()
 
     def _sync_group_controls(self) -> None:
         """群聊：显示群主；只有群主能看到"解散群聊"。"""
         session = self.app.session
-        room = next((r for r in session.rooms if r.get("name") == session.room), None)
+        room = next(
+            (r for r in session.rooms
+             if r.get("room_key", r.get("name")) == session.room),
+            None,
+        )
         is_group = bool(room and room.get("kind") == "group")
         if is_group:
             owner = room.get("owner") or "-"
             self.group_var.set(f"群聊（群主：{owner}）")
             if owner == session.nickname:
+                self.btn_rename.pack(side="right", padx=(0, 8))
                 self.btn_dismiss.pack(side="right", padx=(0, 8))
             else:
+                self.btn_rename.pack_forget()
                 self.btn_dismiss.pack_forget()
         else:
             self.group_var.set("")
+            self.btn_rename.pack_forget()
             self.btn_dismiss.pack_forget()
+
+    def _rename_group(self) -> None:
+        """群主输入新的显示群名；显示名可以和其他群重复。"""
+        name = simpledialog.askstring(
+            "修改群名",
+            "输入新的群名：",
+            initialvalue=self.app.session.room_name or self.app.session.room or "",
+            parent=self,
+        )
+        if name is not None:
+            self.app.call(self.app.session.rename_group(name), "修改群名失败")
 
     def refresh_users(self) -> None:
         self.user_list.delete(0, tk.END)
@@ -601,7 +651,11 @@ class RoomFrame(BaseFrame):
     def on_event(self, kind: str, data: dict) -> None:
         if kind == "room_users" and data.get("room") == self.app.session.room:
             self.refresh_users()
-        if kind in ("room_list", "joined", "group_created"):
+        if kind == "room_history":
+            for message in data.get("messages") or []:
+                speaker = "我" if message.get("from") == self.app.session.nickname else message.get("from")
+                self.append_message(f"{speaker}: {message.get('text', '')}")
+        if kind in ("room_list", "joined", "group_created", "group_renamed"):
             self._sync_group_controls()
         self.append_log(data.get("_line", ""))
 
@@ -778,7 +832,10 @@ class TableFrame(BaseFrame):
     # ------------------------------------------------------------ 渲染 ----
 
     def on_show(self) -> None:
-        self.title_var.set(f"牌桌 - {self.app.session.room}（{self.app.session.role}）")
+        self.title_var.set(
+            f"牌桌 - {self.app.session.room_name or self.app.session.room}"
+            f"（{self.app.session.role}）"
+        )
         self.render_hand()
         self.render_state()
 
@@ -812,6 +869,7 @@ class TableFrame(BaseFrame):
         online_map = {seat["nickname"]: seat.get("online", True)
                       for seat in (state.get("seats") or [])}
         autos = set(state.get("auto_players") or [])
+        ready_players = set(state.get("ready") or [])
         for index, var in enumerate(self.seat_vars):
             if index >= len(players):
                 var.set(f"座位 {index + 1}：空座")
@@ -822,6 +880,8 @@ class TableFrame(BaseFrame):
                 marks.append("地主")
             if name == session.nickname:
                 marks.append("我")
+            if name in ready_players:
+                marks.append("已准备")
             if name in autos:
                 marks.append("托管中")
             if not online_map.get(name, True):
@@ -834,7 +894,12 @@ class TableFrame(BaseFrame):
         state_name = state.get("state", "WAITING")
         my_turn = session.my_turn
         in_match = state_name in ("BIDDING", "PLAYING")
-        self._set_button_enabled("ready", not in_match and session.role == "player")
+        my_ready = session.nickname in ready_players
+        self._set_button_text("ready", "已准备" if my_ready else "准备")
+        self._set_button_enabled(
+            "ready",
+            not in_match and session.role == "player" and not my_ready,
+        )
         self._set_button_text("auto", "取回控制" if session.auto_play else "托管")
         self._set_button_enabled("auto", session.role == "player" and in_match)
         auto_names = state.get("auto_players") or []

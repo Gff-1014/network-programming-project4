@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from .api import check_card_type, cards_greater, hand_str, new_game
+from .ai import choose_play
 from .cards import Card
 
 
@@ -357,7 +358,7 @@ class Match:
         return self.timeout()
 
     def timeout(self) -> Action:
-        """当前玩家超时：叫分视为不叫；跟牌视为过牌；先手自动出最小单张。"""
+        """当前玩家超时：托管优先出能压过的牌，要不起才过牌。"""
         player = self.current
         if player is None:
             return Action(False, Err.BAD_STATE, "没有当前玩家")
@@ -365,12 +366,22 @@ class Match:
             self._emit(type="timeout", player=player, phase="BIDDING", action="不叫")
             return self.bid(player, 0)
         if self.state is State.PLAYING:
-            if self.table:
-                self._emit(type="timeout", player=player, phase="PLAYING", action="过牌")
-                return self.pass_turn(player)
-            smallest = min(self.hands[player], key=Card.get_rank_int)
-            self._emit(type="timeout", player=player, phase="PLAYING", action="自动出最小单张")
-            return self.play(player, [smallest])
+            cards = choose_play(self.hands[player], self.table)
+            if cards:
+                self._emit(
+                    type="timeout",
+                    player=player,
+                    phase="PLAYING",
+                    action=f"自动出牌 {hand_str(cards)}",
+                )
+                return self.play(player, cards)
+            self._emit(
+                type="timeout",
+                player=player,
+                phase="PLAYING",
+                action="要不起，自动过牌",
+            )
+            return self.pass_turn(player)
         return Action(False, Err.BAD_STATE, f"当前状态 {self.state.value} 无超时处理")
 
     # ------------------------------------------------------------ 结算 ----

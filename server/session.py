@@ -268,6 +268,7 @@ class Session:
         return room.snapshot() if room else {}
 
     def welcome_payload(self, request_id: str | None = None) -> dict:
+        room = self.hub.room_of(self)
         return make(
             "welcome",
             {
@@ -276,7 +277,9 @@ class Session:
                 "account": self.nickname,
                 "token": self.token,
                 "room": self.room,
-                "rooms": self.hub.room_list(),
+                "room_key": self.room,
+                "room_name": room.display_name if room else self.room,
+                "rooms": self.hub.room_list_for(self),
                 "online": self.hub.online_count(),
                 "reconnect_grace_ms": self.cfg.reconnect_grace_ms,
             },
@@ -293,6 +296,8 @@ class Session:
                 "account": self.nickname,
                 "token": self.token,
                 "room": self.room,
+                "room_key": self.room,
+                "room_name": room.display_name if room else self.room,
                 "users": room.nicknames() if room else [],
                 "online": self.hub.online_count(),
             },

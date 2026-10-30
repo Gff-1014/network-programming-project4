@@ -91,8 +91,11 @@ class Table:
         if nickname is not None:
             self.seats.pop(nickname, None)
             self.ready_set.discard(nickname)
-            if self.match is not None:
-                self.broadcast(make("table_state", self.public_state()), droppable=True)
+            self.auto_players.discard(nickname)
+            # 主动离开会破坏三人局；清掉旧局，避免新玩家加入后仍卡在旧状态。
+            self.match = None
+            self._last_turn = None
+            self.broadcast(make("table_state", self.public_state()), droppable=True)
         self.spectators.pop(session.conn_id, None)
 
     def on_disconnect(self, session: "Session") -> None:
@@ -116,6 +119,17 @@ class Table:
         if self.match is not None:
             session.send(make("game_state", self.view_for(nickname)))
         return True
+
+    def drop_seat(self, nickname: str) -> None:
+        """重连宽限期结束后，移除这个已放弃的座位并结束旧局。"""
+        if nickname not in self.seats:
+            return
+        self.seats.pop(nickname, None)
+        self.ready_set.discard(nickname)
+        self.auto_players.discard(nickname)
+        self.match = None
+        self._last_turn = None
+        self.broadcast(make("table_state", self.public_state()), droppable=True)
 
     # ------------------------------------------------------------ 对局 ----
 
@@ -261,6 +275,7 @@ class Table:
                 "result": None,
                 "deal_round": 0,
                 "history_len": 0,
+                "ready": sorted(self.ready_set),
                 "seats": [{"nickname": n, "online": self.seats[n] is not None}
                           for n in self.seats],
                 "spectators": len(self.spectators),
@@ -285,6 +300,7 @@ class Table:
         view["seats"] = [{"nickname": n, "online": self.seats.get(n) is not None}
                          for n in self.seats]
         view["auto_players"] = sorted(self.auto_players)
+        view["ready"] = sorted(self.ready_set)
         view["spectators"] = len(self.spectators)
         return view
 

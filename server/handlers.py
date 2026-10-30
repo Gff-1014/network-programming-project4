@@ -92,16 +92,60 @@ async def on_list_conversations(session, data: dict, request_id: str | None) -> 
 
 @register("get_history")
 async def on_get_history(session, data: dict, request_id: str | None) -> None:
-    """拉取与某人的私信历史（仅内存，服务端重启即清空）。"""
+    """拉取与某人的私信历史（SQLite，支持向前分页）。"""
     if not _require_login(session):
         return
     peer = data.get("peer")
     if not isinstance(peer, str) or not peer:
         session.send(error(ErrCode.BAD_MESSAGE, "缺少 peer", request_id))
         return
+    before_id = data.get("before_id")
+    if before_id is not None and not isinstance(before_id, int):
+        session.send(error(ErrCode.BAD_MESSAGE, "before_id 必须是整数", request_id))
+        return
+    limit = data.get("limit")
+    messages, has_more, next_before = session.hub.private_history_page(
+        session.nickname,
+        peer,
+        before_id=before_id,
+        limit=limit if isinstance(limit, int) else None,
+    )
     session.send(make("history", {
         "peer": peer,
-        "messages": session.hub.private_history(session.nickname, peer),
+        "messages": messages,
+        "has_more": has_more,
+        "next_before": next_before,
+    }, request_id))
+
+
+@register("room_history")
+async def on_room_history(session, data: dict, request_id: str | None) -> None:
+    """分页拉取当前房间或频道的消息历史。"""
+    if not _require_login(session):
+        return
+    room_key = data.get("room") or session.room
+    room = session.hub.rooms.get(room_key) if isinstance(room_key, str) else None
+    if room is None:
+        session.send(error(ErrCode.ROOM_NOT_FOUND, "房间不存在", request_id))
+        return
+    if room.kind == "group" and not room.has_account(session.nickname):
+        session.send(error(ErrCode.ROOM_NOT_FOUND, "房间不存在", request_id))
+        return
+    before_id = data.get("before_id")
+    if before_id is not None and not isinstance(before_id, int):
+        session.send(error(ErrCode.BAD_MESSAGE, "before_id 必须是整数", request_id))
+        return
+    messages, has_more, next_before = session.hub.room_history_page(
+        room,
+        before_id=before_id,
+        limit=data.get("limit") if isinstance(data.get("limit"), int) else None,
+    )
+    session.send(make("room_history", {
+        "room": room.name,
+        "room_name": room.display_name,
+        "messages": messages,
+        "has_more": has_more,
+        "next_before": next_before,
     }, request_id))
 
 
@@ -149,7 +193,7 @@ async def on_ping(session, data: dict, request_id: str | None) -> None:
 @register("list_rooms")
 async def on_list_rooms(session, data: dict, request_id: str | None) -> None:
     """返回房间列表。"""
-    session.send(make("room_list", {"rooms": session.hub.room_list()}, request_id))
+    session.send(make("room_list", {"rooms": session.hub.room_list_for(session)}, request_id))
 
 
 @register("list_users")
@@ -192,8 +236,24 @@ async def on_join_room(session, data: dict, request_id: str | None) -> None:
             return
         role = "player" if session.nickname in table.seats else "spectator"
         session.send(make("table_state", table.public_state()))
-    session.send(make("joined", {"room": room_name, "users": room.nicknames() if room else [],
-                                 "role": role}, request_id))
+    session.send(make("joined", {
+        "room": room_name,
+        "room_key": room_name,
+        "room_name": room.display_name if room else room_name,
+        "users": room.nicknames() if room else [],
+        "role": role,
+    }, request_id))
+    if room is not None and room.kind == "group":
+        session.hub.send_group_state(session)
+    if room is not None:
+        messages, has_more, next_before = session.hub.room_history_page(room)
+        session.send(make("room_history", {
+            "room": room.name,
+            "room_name": room.display_name,
+            "messages": messages,
+            "has_more": has_more,
+            "next_before": next_before,
+        }))
 
 
 @register("leave_room")
@@ -209,7 +269,12 @@ async def on_leave_room(session, data: dict, request_id: str | None) -> None:
     if not ok:
         session.send(error(code or ErrCode.NOT_IN_ROOM, message or "退出失败", request_id))
         return
-    session.send(make("left", {"room": previous, "to": session.room}, request_id))
+    destination = session.hub.rooms.get(session.room) if session.room else None
+    session.send(make("left", {
+        "room": previous,
+        "to": session.room,
+        "to_name": destination.display_name if destination else session.room,
+    }, request_id))
 
 
 @register("create_group")
@@ -226,8 +291,37 @@ async def on_create_group(session, data: dict, request_id: str | None) -> None:
         session.send(error(code or ErrCode.BAD_MESSAGE, message or "建群失败", request_id))
         return
     room = session.hub.rooms[room_name]
-    session.send(make("joined", {"room": room_name, "users": room.nicknames(),
-                                 "role": "player", "owner": session.nickname}, request_id))
+    session.send(make("joined", {
+        "room": room_name,
+        "room_key": room_name,
+        "room_name": room.display_name,
+        "users": room.nicknames(),
+        "role": "player",
+        "owner": session.nickname,
+    }, request_id))
+    session.hub.broadcast_group_state(room)
+
+
+@register("create_channel")
+async def on_create_channel(session, data: dict, request_id: str | None) -> None:
+    """管理员创建公共频道。"""
+    if not _require_login(session):
+        return
+    name = data.get("name")
+    if not isinstance(name, str):
+        session.send(error(ErrCode.BAD_MESSAGE, "缺少频道名", request_id))
+        return
+    ok, code, message, room_key = session.hub.create_channel(session, name)
+    if not ok:
+        session.send(error(code or ErrCode.BAD_MESSAGE, message or "创建频道失败", request_id))
+        return
+    room = session.hub.rooms[room_key]
+    session.send(make("channel_created", {
+        "room": room.name,
+        "room_key": room.name,
+        "room_name": room.display_name,
+        "owner": room.owner,
+    }, request_id))
 
 
 @register("delete_group")
@@ -244,6 +338,244 @@ async def on_delete_group(session, data: dict, request_id: str | None) -> None:
         session.send(error(code or ErrCode.GROUP_NOT_FOUND, message or "解散失败", request_id))
         return
     session.send(make("left", {"room": room_name, "to": session.room}, request_id))
+
+
+@register("rename_group")
+async def on_rename_group(session, data: dict, request_id: str | None) -> None:
+    """群主修改群显示名，群名允许重复。"""
+    if not _require_login(session):
+        return
+    display_name = data.get("name")
+    if not isinstance(display_name, str):
+        session.send(error(ErrCode.BAD_MESSAGE, "缺少群名", request_id))
+        return
+    ok, code, message = session.hub.rename_group(session, display_name)
+    if not ok:
+        session.send(error(code or ErrCode.BAD_MESSAGE, message or "修改群名失败", request_id))
+        return
+    session.send(make("ok", {"action": "rename_group"}, request_id))
+
+
+@register("group_state")
+async def on_group_state(session, data: dict, request_id: str | None) -> None:
+    """获取当前群的公告、投票和文件快照。"""
+    if not _require_login(session):
+        return
+    session.hub.send_group_state(session)
+
+
+@register("join_invite")
+async def on_join_invite(session, data: dict, request_id: str | None) -> None:
+    """凭群二维码中的 token 加入群聊。"""
+    if not _require_login(session):
+        return
+    token = data.get("token")
+    if not isinstance(token, str) or not token:
+        session.send(error(ErrCode.GROUP_NOT_FOUND, "缺少群邀请 token", request_id))
+        return
+    ok, code, message, room_name, pending = session.hub.request_join_by_invite(session, token)
+    if not ok:
+        session.send(error(code or ErrCode.GROUP_NOT_FOUND, message or "加群失败", request_id))
+        return
+    room = session.hub.rooms[room_name]
+    if pending:
+        item = room.pending_invites.get(session.nickname, {})
+        session.send(make("group_invite_pending", {
+            "room": room_name,
+            "room_name": room.display_name,
+            "group_id": room.group_id,
+            **item,
+        }, request_id))
+        return
+    session.send(make("joined", {
+        "room": room_name,
+        "room_key": room_name,
+        "room_name": room.display_name,
+        "users": room.nicknames(),
+        "role": "player",
+        "owner": room.owner,
+        "group_id": room.group_id,
+    }, request_id))
+    session.hub.send_group_state(session)
+
+
+@register("invite_group_member")
+async def on_invite_group_member(session, data: dict, request_id: str | None) -> None:
+    """群成员邀请在线非成员，申请等待群主审批。"""
+    if not _require_login(session):
+        return
+    members = data.get("members")
+    if not isinstance(members, list):
+        session.send(error(ErrCode.BAD_MESSAGE, "members 必须是账号数组", request_id))
+        return
+    ok, code, message = session.hub.invite_group_members(session, members)
+    if not ok:
+        session.send(error(code or ErrCode.BAD_MESSAGE, message or "邀请失败", request_id))
+        return
+    session.send(make("ok", {"action": "invite_group_member"}, request_id))
+
+
+@register("approve_group_invite")
+async def on_approve_group_invite(session, data: dict, request_id: str | None) -> None:
+    """群主批准入群申请。"""
+    if not _require_login(session):
+        return
+    account = data.get("account")
+    if not isinstance(account, str) or not account:
+        session.send(error(ErrCode.BAD_MESSAGE, "缺少申请账号", request_id))
+        return
+    ok, code, message = session.hub.approve_group_invite(session, account)
+    if not ok:
+        session.send(error(code or ErrCode.BAD_MESSAGE, message or "审批失败", request_id))
+        return
+    session.send(make("ok", {"action": "approve_group_invite", "account": account}, request_id))
+
+
+@register("reject_group_invite")
+async def on_reject_group_invite(session, data: dict, request_id: str | None) -> None:
+    """群主拒绝入群申请。"""
+    if not _require_login(session):
+        return
+    account = data.get("account")
+    if not isinstance(account, str) or not account:
+        session.send(error(ErrCode.BAD_MESSAGE, "缺少申请账号", request_id))
+        return
+    ok, code, message = session.hub.reject_group_invite(session, account)
+    if not ok:
+        session.send(error(code or ErrCode.BAD_MESSAGE, message or "审批失败", request_id))
+        return
+    session.send(make("ok", {"action": "reject_group_invite", "account": account}, request_id))
+
+
+@register("set_announcement")
+async def on_set_announcement(session, data: dict, request_id: str | None) -> None:
+    """群主更新群公告。"""
+    if not _require_login(session):
+        return
+    text = data.get("text")
+    if not isinstance(text, str):
+        session.send(error(ErrCode.BAD_MESSAGE, "text 必须是字符串", request_id))
+        return
+    ok, code, message = session.hub.set_announcement(session, text)
+    if not ok:
+        session.send(error(code or ErrCode.BAD_MESSAGE, message or "公告更新失败", request_id))
+        return
+    session.send(make("ok", {"action": "set_announcement"}, request_id))
+
+
+@register("poll_create")
+async def on_poll_create(session, data: dict, request_id: str | None) -> None:
+    """群主发起单选投票。"""
+    if not _require_login(session):
+        return
+    title = data.get("title")
+    options = data.get("options")
+    if not isinstance(title, str) or not isinstance(options, list):
+        session.send(error(ErrCode.BAD_MESSAGE, "缺少投票标题或选项", request_id))
+        return
+    deadline_ms = data.get("deadline_ms")
+    if deadline_ms is None and isinstance(data.get("deadline_minutes"), (int, float)):
+        deadline_ms = now_ms() + int(data["deadline_minutes"] * 60_000)
+    if deadline_ms is not None and not isinstance(deadline_ms, int):
+        session.send(error(ErrCode.BAD_MESSAGE, "deadline_ms 必须是整数", request_id))
+        return
+    ok, code, message, poll = session.hub.create_poll(
+        session,
+        title,
+        options,
+        deadline_ms,
+        bool(data.get("anonymous", False)),
+    )
+    if not ok:
+        session.send(error(code or ErrCode.BAD_MESSAGE, message or "创建投票失败", request_id))
+        return
+    session.send(make("ok", {
+        "action": "poll_create",
+        "poll": poll.view(session.nickname) if poll else None,
+    }, request_id))
+
+
+@register("poll_list")
+async def on_poll_list(session, data: dict, request_id: str | None) -> None:
+    """返回当前群投票列表。"""
+    if not _require_login(session):
+        return
+    session.hub.send_group_state(session)
+
+
+@register("poll_vote")
+async def on_poll_vote(session, data: dict, request_id: str | None) -> None:
+    """给当前群的投票投一票。"""
+    if not _require_login(session):
+        return
+    poll_id = data.get("poll_id")
+    option_id = data.get("option_id")
+    if not isinstance(poll_id, str) or not isinstance(option_id, str):
+        session.send(error(ErrCode.BAD_MESSAGE, "缺少 poll_id 或 option_id", request_id))
+        return
+    ok, code, message = session.hub.vote_poll(session, poll_id, option_id)
+    if not ok:
+        session.send(error(code or ErrCode.BAD_MESSAGE, message or "投票失败", request_id))
+        return
+    session.send(make("ok", {"action": "poll_vote"}, request_id))
+
+
+@register("poll_close")
+async def on_poll_close(session, data: dict, request_id: str | None) -> None:
+    """群主结束投票。"""
+    if not _require_login(session):
+        return
+    poll_id = data.get("poll_id")
+    if not isinstance(poll_id, str):
+        session.send(error(ErrCode.BAD_MESSAGE, "缺少 poll_id", request_id))
+        return
+    ok, code, message = session.hub.close_poll(session, poll_id)
+    if not ok:
+        session.send(error(code or ErrCode.BAD_MESSAGE, message or "结束投票失败", request_id))
+        return
+    session.send(make("ok", {"action": "poll_close"}, request_id))
+
+
+@register("group_file_register")
+async def on_group_file_register(session, data: dict, request_id: str | None) -> None:
+    """登记网关已上传成功的群文件元数据。"""
+    if not _require_login(session):
+        return
+    group_id = data.get("group_id")
+    file_id = data.get("file_id")
+    name = data.get("name")
+    mime = data.get("mime", "application/octet-stream")
+    size = data.get("size")
+    kind = data.get("kind", "file")
+    if not all(isinstance(item, str) and item for item in (group_id, file_id, name)):
+        session.send(error(ErrCode.BAD_MESSAGE, "文件元数据字段不完整", request_id))
+        return
+    if not isinstance(size, int) or not isinstance(mime, str):
+        session.send(error(ErrCode.BAD_MESSAGE, "文件大小或类型不合法", request_id))
+        return
+    ok, code, message = session.hub.register_group_file(
+        session, group_id, file_id, name, mime, size, kind,
+    )
+    if not ok:
+        session.send(error(code or ErrCode.BAD_MESSAGE, message or "文件登记失败", request_id))
+        return
+    session.send(make("ok", {"action": "group_file_register"}, request_id))
+
+
+@register("group_file_delete")
+async def on_group_file_delete(session, data: dict, request_id: str | None) -> None:
+    """删除群文件元数据（文件内容由网页网关清理）。"""
+    if not _require_login(session):
+        return
+    file_id = data.get("file_id")
+    if not isinstance(file_id, str) or not file_id:
+        session.send(error(ErrCode.BAD_MESSAGE, "缺少 file_id", request_id))
+        return
+    ok, code, message = session.hub.delete_group_file(session, file_id)
+    if not ok:
+        session.send(error(code or ErrCode.FILE_NOT_FOUND, message or "删除文件失败", request_id))
+        return
+    session.send(make("ok", {"action": "group_file_delete"}, request_id))
 
 
 @register("room_msg")
@@ -269,12 +601,20 @@ async def on_room_msg(session, data: dict, request_id: str | None) -> None:
         session.send(error(ErrCode.NOT_IN_ROOM, "你不在任何房间", request_id))
         return
 
+    stored = session.hub.record_room_message(
+        room,
+        session.nickname,
+        text,
+    )
     payload = make(
         "room_msg",
         {
             "room": room.name,
+            "room_name": room.display_name,
             "from": session.nickname,
             "text": text,
+            "message_id": stored["message_id"],
+            "ts_ms": stored["created_at"],
         },
     )
     delivered = room.broadcast(payload, droppable=True)
@@ -305,11 +645,28 @@ async def on_private_msg(session, data: dict, request_id: str | None) -> None:
         session.send(error(ErrCode.USER_NOT_FOUND, f"{target} 不在线", request_id))
         return
 
-    payload = make("private_msg", {"from": session.nickname, "to": target, "text": text})
+    stored = session.hub.record_private(
+        session.nickname,
+        target,
+        text,
+        now_ms(),
+    )
+    payload = make("private_msg", {
+        "from": session.nickname,
+        "to": target,
+        "text": text,
+        "message_id": stored["message_id"],
+        "ts_ms": stored["created_at"],
+    })
     receiver.send(payload)
-    session.hub.record_private(session.nickname, target, text, now_ms())
-    session.send(make("private_msg", {"from": session.nickname, "to": target, "text": text,
-                                     "self": True}, request_id))
+    session.send(make("private_msg", {
+        "from": session.nickname,
+        "to": target,
+        "text": text,
+        "message_id": stored["message_id"],
+        "ts_ms": stored["created_at"],
+        "self": True,
+    }, request_id))
 
 
 # ------------------------------------------------------------ 牌桌消息 ----

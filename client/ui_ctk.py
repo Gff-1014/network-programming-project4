@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import simpledialog, ttk
 
 try:  # 没装依赖时整个模块优雅降级
     import customtkinter as ctk
@@ -170,6 +170,7 @@ class LobbyFrame(ctk.CTkFrame):
         super().__init__(parent, fg_color=APP_BG, corner_radius=0)
         self.app = app
         self._room_names: list[str] = []
+        self._room_keys: list[str] = []
 
         head = ctk.CTkFrame(self, fg_color="transparent")
         head.pack(fill="x", padx=16, pady=(12, 6))
@@ -182,6 +183,10 @@ class LobbyFrame(ctk.CTkFrame):
         ctk.CTkButton(head, text="邀请建群", width=100, fg_color=ACCENT, text_color="#0B0B0B",
                       hover_color=ACCENT_HOVER,
                       command=self.app.do_create_group).pack(side="right", padx=(0, 8))
+        self.channel_button = ctk.CTkButton(
+            head, text="+ 频道", width=100, fg_color=CARD_BG_2,
+            hover_color="#3A3A3A", command=self.app.do_create_channel
+        )
 
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=16, pady=(0, 12))
@@ -225,6 +230,10 @@ class LobbyFrame(ctk.CTkFrame):
         self._render_users()
         self._render_conversations()
         self.account_label.configure(text=f"当前账号：{self.app.session.account or '-'}")
+        if self.app.session.nickname == "wanjia1":
+            self.channel_button.pack(side="right", padx=(0, 8))
+        else:
+            self.channel_button.pack_forget()
         self.app.call(self.app.session.refresh_users(), "刷新在线玩家失败")
 
     def _render_conversations(self) -> None:
@@ -245,15 +254,24 @@ class LobbyFrame(ctk.CTkFrame):
     def _render_rooms(self, rooms: list[dict]) -> None:
         for child in self.rooms_box.winfo_children():
             child.destroy()
-        kind_label = {"lobby": "大厅", "chat": "聊天", "doudizhu": "牌桌"}
+        kind_label = {
+            "lobby": "大厅",
+            "chat": "聊天",
+            "doudizhu": "牌桌",
+            "group": "群聊",
+            "channel": "公共频道",
+        }
         self._room_names = []
+        self._room_keys = []
         for room in rooms:
             name = room.get("name", "")
+            room_key = room.get("room_key", name)
             self._room_names.append(name)
+            self._room_keys.append(room_key)
             text = f"{name}　{kind_label.get(room.get('kind'), room.get('kind'))}・{room.get('count')} 人"
             ctk.CTkButton(self.rooms_box, text=text, anchor="w", height=34, corner_radius=8,
                           fg_color=CARD_BG_2, hover_color=ACCENT_HOVER,
-                          command=lambda r=name: self.app.do_join(r)).pack(fill="x", pady=3, padx=4)
+                          command=lambda r=room_key: self.app.do_join(r)).pack(fill="x", pady=3, padx=4)
 
     def _render_users(self) -> None:
         for child in self.users_box.winfo_children():
@@ -358,6 +376,10 @@ class RoomFrame(ctk.CTkFrame):
         self.group_var = tk.StringVar(value="")
         ctk.CTkLabel(header, textvariable=self.group_var, font=ctk.CTkFont(*FONT_UI),
                      text_color=TEXT_MUTED).pack(side="left", padx=12)
+        self.btn_rename = ctk.CTkButton(
+            header, text="修改群名", width=100, fg_color=CARD_BG_2,
+            hover_color="#3A3A3A", command=self._rename_group,
+        )
         self.btn_dismiss = ctk.CTkButton(header, text="解散群聊", width=100, fg_color="#7A2E2E",
                                          hover_color=DANGER, command=app.do_delete_group)
         ctk.CTkButton(header, text="离开房间", width=100, fg_color=CARD_BG_2, hover_color="#3A3A3A",
@@ -451,29 +473,51 @@ class RoomFrame(ctk.CTkFrame):
     # ---------- 事件 ----------
 
     def on_show(self) -> None:
-        self.title_var.set(f"聊天房 - {self.app.session.room}")
+        self.title_var.set(f"聊天房 - {self.app.session.room_name or self.app.session.room}")
         self._sync_group_controls()
         self.refresh_users()
 
     def _sync_group_controls(self) -> None:
         """群聊：显示群主，只有群主能看到"解散群聊"。"""
         session = self.app.session
-        room = next((r for r in session.rooms if r.get("name") == session.room), None)
+        room = next(
+            (r for r in session.rooms
+             if r.get("room_key", r.get("name")) == session.room),
+            None,
+        )
         if room and room.get("kind") == "group":
             owner = room.get("owner") or "-"
             self.group_var.set(f"群聊（群主：{owner}）")
             if owner == session.nickname:
+                self.btn_rename.pack(side="right", padx=(0, 8))
                 self.btn_dismiss.pack(side="right", padx=(0, 8))
             else:
+                self.btn_rename.pack_forget()
                 self.btn_dismiss.pack_forget()
         else:
             self.group_var.set("")
+            self.btn_rename.pack_forget()
             self.btn_dismiss.pack_forget()
+
+    def _rename_group(self) -> None:
+        """群主修改显示群名，允许与其他群重名。"""
+        name = simpledialog.askstring(
+            "修改群名",
+            "输入新的群名：",
+            initialvalue=self.app.session.room_name or self.app.session.room or "",
+            parent=self,
+        )
+        if name is not None:
+            self.app.call(self.app.session.rename_group(name), "修改群名失败")
 
     def on_event(self, kind: str, data: dict) -> None:
         if kind == "room_users" and data.get("room") == self.app.session.room:
             self.refresh_users()
-        if kind in ("room_list", "joined", "group_created"):
+        if kind == "room_history":
+            for message in data.get("messages") or []:
+                speaker = "我" if message.get("from") == self.app.session.nickname else message.get("from")
+                self.append_message(f"{speaker}: {message.get('text', '')}")
+        if kind in ("room_list", "joined", "group_created", "group_renamed"):
             self._sync_group_controls()
         if data.get("_line") and kind in ("room_msg", "private_msg", "user_joined",
                                           "user_left", "user_reconnecting", "error"):
